@@ -1,0 +1,22 @@
+[package]
+name = "pk-med-dicom"
+description = "A DICOM Part 10 header reader (stops at Pixel Data, never decodes pixels), DICOMDIR reading, study and series summaries, and a synthetic DICOM writer for tests."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[features]
+# The synthetic study writer, for a consumer's tests.
+test-util = []
+
+[dependencies]
+pk-cli-core = { workspace = true }
+# The deflated transfer syntax (1.2.840.10008.1.2.1.99), read and written.
+flate2 = { workspace = true }
+
+[dev-dependencies]
+pk-med-dicom = { path = ".", features = ["test-util"] }

@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.3.0 — 2026-11-12
+
+Pins cli-common v0.31.1, as v0.2.0 does.
+
+- `pk-med-dicom` (DESIGN.md §4): our own DICOM Part 10 header reader. No
+  one else's DICOM library is used, and no pixel is decoded.
+  - `read_header` and `read_file`: the preamble, or a file with none; the
+    file meta information; and the data set in implicit or explicit VR
+    little endian, explicit VR big endian, deflated, or a compressed
+    syntax's explicit little endian. Sequences of defined and undefined
+    length are read, and an undefined-length `UN` is read as a sequence.
+    Reading stops at Pixel Data. Limits are enforced on value size, header
+    size (each element and item counting 128 bytes), inflated size
+    (256 MiB) and nesting.
+  - `Header`: `get(tag) -> Option<&str>` for a `Tag` or `0xGGGGEEEE`,
+    `element(tag)`, and typed getters (`study_uid`, `modality`,
+    `study_date` as `YYYY-MM-DD`, `patient_name` as a person writes it,
+    ...). `Debug` and errors show no value.
+  - `read_dicomdir` and `dicomdir_entries`: the files a DICOMDIR names,
+    with their study and series. Records are walked by offset, refusing a
+    dangling offset or a cycle, or in sequence order when the first root
+    offset is zero. A path that leaves the disc is refused.
+  - `StudySummary::from_headers`: studies and series with their counts.
+    It is not a wire shape (no `Serialize`): a CLI wraps it in its own
+    schema-tagged DTO.
+  - `DicomError` and `Value` are `#[non_exhaustive]`. In a deflated data
+    set, a stream that does not inflate is `Malformed`, and an error of the
+    file under it stays `Io`.
+  - `is_dicom`, `is_dicom_file`, `iso_date`, `person_name`, and
+    `MEDIA_STORAGE_DIRECTORY`.
+  - Feature `test-util`: `synthetic::SyntheticStudy` writes a synthetic
+    study (`IMAGES/S<n>/I<m>` and a DICOMDIR) in any of four transfer
+    syntaxes, and `encode`, `part10` and `Node` build any data set.
+
 ## v0.2.0 — 2026-11-12
 
 Pins cli-common v0.31.1 for every `pk-cli-*` (`private_file` syncs before it

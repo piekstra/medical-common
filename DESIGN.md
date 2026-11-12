@@ -1,8 +1,8 @@
 # medical-common: the `health-records/v1` profile
 
 Status: v0.1.0 ships `pk-med-records` and `pk-med-fhir`; v0.2.0 adds
-`pk-med-smart` (SMART App Launch, §3). `pk-med-dicom` (DICOM headers)
-follows.
+`pk-med-smart` (SMART App Launch, §3); v0.3.0 adds `pk-med-dicom` (DICOM
+headers, §4).
 
 This document is the specification of the profile, in the style of
 cli-common's domain profiles (`documents/v1`, `utility/v1`, cli-common
@@ -617,14 +617,187 @@ tests give `CredentialStore` an empty service from its
 `<PREFIX>_KEYCHAIN_SERVICE` test override, so nothing reads the real
 keychain.
 
-## 4. Consumption
+## 4. DICOM headers (crate `pk-med-dicom`)
+
+Our own reader of DICOM Part 10 files, enough to file a disc's studies and
+no more: it reads the header and stops at Pixel Data. No pixel is decoded,
+and no one else's DICOM library is used. flate2 inflates the deflated
+transfer syntax.
+
+### 4.1 What it reads
+
+- The 128-byte preamble and `DICM`, or a file that starts with the file
+  meta group and has no preamble.
+- The file meta information (group 0002), explicit VR little endian, as
+  PS3.10 requires.
+- The data set in its transfer syntax:
+
+  | Transfer syntax | UID |
+  |---|---|
+  | implicit VR little endian | `1.2.840.10008.1.2` |
+  | explicit VR little endian | `1.2.840.10008.1.2.1` |
+  | deflated explicit VR little endian | `1.2.840.10008.1.2.1.99` |
+  | explicit VR big endian (retired) | `1.2.840.10008.1.2.2` |
+  | any other (JPEG, RLE, ...): the data set is explicit VR little endian; only Pixel Data differs | |
+
+- Sequences and items of defined or undefined length, nested up to
+  `MAX_DEPTH` (16). A `UN` element of undefined length is read as an
+  implicit VR little endian sequence (PS3.5 §6.2.2).
+- Encapsulated pixel data inside a sequence (an icon) is skipped. Reading
+  stops at the top-level Pixel Data tag (7FE0,0010). The reader buffers
+  8 KiB, so it may hold up to that much past the tag, never decoded.
+- An implicit-VR file names no VRs. A small dictionary gives the VR of each
+  tag this crate reads by name; any other tag reads as `UN`, its bytes.
+
+A hostile file cannot cost unbounded memory or time:
+
+| Limit | Value | Past it |
+|---|---|---|
+| `MAX_VALUE_BYTES`, one text or number value | 16 MiB | refused (`DicomError::Limit`) before anything is allocated |
+| the same, one bulk value (OB, OW, UN, ...) | 16 MiB | skipped (`Value::Skipped`), and reading goes on |
+| `MAX_HEADER_BYTES`, what a header holds before Pixel Data: its values, and 128 bytes for each element and item | 64 MiB | refused |
+| `MAX_INFLATED_BYTES`, a deflated data set inflated | 256 MiB | refused |
+| `MAX_DEPTH`, sequence nesting | 16 | refused |
+
+A skipped value is read past, never kept, so what it costs is bounded by
+the file's own size, or by `MAX_INFLATED_BYTES` in a deflated one. A
+File Meta Group Length that is negative or overflows is ignored, and the
+meta group is read while its tags are group 0002.
+
+### 4.2 `Header`
+
+`read_header(reader)` (any `Read`, buffered inside) and `read_file(path)`
+return a `Header`:
+
+- `get(tag)` gives a text element's whole value: UTF-8 where it is valid,
+  else Latin-1, without its padding, and several values keep their `\`. It
+  is `None` when the element is absent, empty or not text. A tag is a `Tag`
+  or `0xGGGGEEEE`. Group 0002 is read from the meta information, any other
+  group from the data set's top level.
+- `element(tag)` gives any element (sequences, numbers, bytes), and
+  `meta()` and `dataset()` give the two data sets whole.
+- Getters, each `None` when the file does not say:
+
+| Getter | Type | Element |
+|---|---|---|
+| `study_uid`, `series_uid` | `&str` | Study and Series Instance UID |
+| `sop_class_uid`, `sop_instance_uid` | `&str` | the data set's, else the meta information's |
+| `modality`, `body_part` | `&str` | Modality, Body Part Examined |
+| `study_date`, `series_date` | `String` | `YYYY-MM-DD` (`iso_date`): a day the calendar has, else `None` |
+| `study_time`, `study_description`, `series_description` | `&str` | as written |
+| `series_number`, `instance_number`, `rows`, `columns` | `i64` | |
+| `number_of_frames` | `u32` | |
+| `institution`, `accession` | `&str` | Institution Name, Accession Number |
+| `referring_physician`, `patient_name` | `String` | `person_name`: `Prefix Given Middle Family Suffix`, from the alphabetic group |
+| `patient_id`, `patient_sex` | `&str` | |
+| `patient_birth_date` | `String` | `YYYY-MM-DD` |
+| `transfer_syntax` | `&str` | from the meta information |
+| `has_pixel_data` | `bool` | whether reading reached Pixel Data |
+
+The patient getters are for the person's own terminal. `Debug` on a
+`Header`, `Dataset`, `Element` or `Value` shows tags, VRs and sizes, never
+a value, and an error names a byte offset and a tag, never a value.
+
+### 4.3 DICOMDIR
+
+`read_dicomdir(path)` lists every file a DICOMDIR names, as a
+`DicomDirEntry { path, record_type, study_uid, series_uid, sop_uid,
+modality }`. The study and series are those of the records above it.
+`dicomdir_entries(header, root)` does the same for a header already read.
+
+- Records are walked from the First Root Record through each record's
+  Lower Level and Next offsets. Offsets count from the file's first byte,
+  preamble included. An offset that points at no record, or a cycle, is
+  refused (`DicomError::Malformed`). A record no offset reaches is left
+  out. When the First Root Record is absent or zero, as some writers leave
+  it, the records are read in sequence order instead, each under the last
+  patient, study and series before it.
+- A record whose Record In-use Flag is 0 is left out, as is one whose
+  Referenced File ID is absent, empty or not text.
+- Referenced File ID components (`IMAGES\S1\I1`) are joined under the
+  DICOMDIR's directory. A component that is empty, `.` or `..`, absolute,
+  or holds a `/` or `:` is refused (`DicomError::Malformed`), so a disc
+  cannot name a file outside itself.
+
+### 4.4 Summaries
+
+`StudySummary::from_headers(&headers)` makes one summary per Study
+Instance UID, in the order each study is first seen:
+
+- the study's `date`, `description` and `accession_number`;
+- `modalities`, sorted, each once;
+- `series`, each a `SeriesSummary { uid, number, modality, description,
+  body_part, instances }`, sorted by series number, with ties keeping the
+  order first seen. `uid` is `None` for the files that name no Series
+  Instance UID, grouped together;
+- `instances`: distinct SOP Instance UIDs, so a second copy of a file
+  counts once.
+
+A file with no Study Instance UID is left out. A summary leaves out the
+patient's name, id, birth date and sex. Its UIDs, accession number and date
+still identify one visit, so it is medical data, for the person's own
+terminal and records folder. It is not a wire shape: a CLI that prints one
+wraps it in its own schema-tagged DTO.
+
+### 4.5 Errors
+
+| `DicomError` | `CliError` | Exit |
+|---|---|---|
+| `NotDicom`: no `DICM` and no meta group | `Usage` | 2 |
+| `Truncated { offset }`, `Malformed { offset, what }`, `Limit { offset, what }`, `Io` | `Other` | 1 |
+
+In a deflated data set, a stream that does not inflate is `Malformed`, one
+that stops before its end is `Truncated` as a cut plain file is, and an
+error of the file under it is `Io`, unchanged.
+
+`DicomError` and `Value` are `#[non_exhaustive]`: a match needs a `_` arm,
+so a later variant is not a break. `DicomError::Io` returns its
+`io::Error` as `source()`, and `From<io::Error>` makes one.
+`is_dicom(prefix)` tests a file's first 132 bytes, and `is_dicom_file(path)`
+a file's, `false` when it does not open.
+
+### 4.6 `test-util`: synthetic DICOM
+
+`synthetic::SyntheticStudy::new(modality)` writes a study as a disc holds
+it: `DICOMDIR` and `IMAGES/S<series>/I<instance>`. It returns the
+instances' paths, series by series.
+
+| Builder | Default |
+|---|---|
+| `series(n)`, `instances(n)` (each series) | 1, 3 |
+| `seed(n)`: UIDs `2.25.0.<seed>`, `.<series>`, `.<instance>` | 1 |
+| `study_date` (`YYYYMMDD` or `YYYY-MM-DD`) | 2026-03-04 |
+| `patient_birth_date`, likewise | 1970-01-01 |
+| `body_part`, `institution`, `accession`, `description` | `ABDOMEN`, `Example Imaging`, `ACC000001`, `Synthetic study` |
+| `patient_name`, `patient_id` | `Testperson^Robin`, `PID000001` |
+| `transfer_syntax(TransferSyntax::…)` | `ExplicitLittle` (also `ImplicitLittle`, `ExplicitBig`, `Deflated`) |
+| `dicomdir(false)`, `dicomdir_without_offsets()` | a DICOMDIR with its offsets |
+
+Each instance has:
+
+- the modality's SOP class;
+- Referring Physician `Clinician^Example`, and Series Description
+  `Series <n>`;
+- an undefined-length Referenced Study Sequence;
+- an icon with encapsulated fragments;
+- a 2×2 8-bit pixel matrix;
+- an element after Pixel Data, which no reader may see.
+
+The DICOMDIR is explicit VR little endian, with computed record offsets.
+`encode`, `part10` and `Node` build any other data set a test needs.
+Every value is a dummy, and `2.25.0` is no equipment's root: `2.25` is
+the UUID arc, and no UUID is 0. No DICOM file is committed; tests write
+them at run time.
+
+## 5. Consumption
 
 Pin a tag, never a branch or a path:
 
 ```toml
-pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.2.0" }
-pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.2.0" }
-pk-med-smart = { git = "https://github.com/piekstra/medical-common", tag = "v0.2.0" }   # features = ["rsa"] for §3.4
+pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.3.0" }
+pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.3.0" }
+pk-med-smart = { git = "https://github.com/piekstra/medical-common", tag = "v0.3.0" }   # features = ["rsa"] for §3.4
+pk-med-dicom = { git = "https://github.com/piekstra/medical-common", tag = "v0.3.0" }   # features = ["test-util"] for §4.6
 ```
 
 Each medical-common tag pins one cli-common tag for every `pk-cli-*` crate,
@@ -636,3 +809,4 @@ does not convert to the other.
 |---|---|
 | v0.1.0 | v0.31.0 |
 | v0.2.0 | v0.31.1 |
+| v0.3.0 | v0.31.1 |

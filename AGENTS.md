@@ -18,7 +18,7 @@ changing any public shape: the CLIs pin tags of this repo.
   synthetic. A check against real data reports counts, statuses and exit
   codes only, or is left to the user in their own terminal.
 - **No records leave the machine** except to the program that asked. No
-  third-party service, no FHIR or SMART library or SDK, no health-data
+  third-party service, no FHIR, SMART or DICOM library or SDK, no health-data
   aggregator, no cloud OCR or AI. General-purpose crates (serde, sha2,
   base64) are fine.
 - **Secrets never on argv, never in logs, never in `Debug`.** Tokens live in
@@ -29,7 +29,7 @@ changing any public shape: the CLIs pin tags of this repo.
   on read and omitted when empty; anything else is `/v2`. A record's raw
   text is never re-serialized: streams carry `RawResource`.
 - **One cli-common tag** for every `pk-cli-*` crate, the same tag the
-  consuming CLIs pin (DESIGN.md §3). Never commit a `[patch]` to a local
+  consuming CLIs pin (DESIGN.md §5). Never commit a `[patch]` to a local
   path; a temporary, uncommitted `.cargo/config.toml` patch is fine.
 - Exit codes are piekstra-cli/1's: 3 auth, 4 not found, 5 upstream.
 
