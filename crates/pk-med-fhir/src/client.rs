@@ -218,6 +218,37 @@ pub struct SearchResult {
     pub unreadable: Vec<String>,
 }
 
+/// One page of a search, as [`FhirClient::search_pages`] hands it over.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct SearchPage {
+    /// Which page, from 1.
+    pub number: u32,
+    /// Entries of mode `match`, or of no mode.
+    pub resources: Vec<RawResource>,
+    /// Entries of mode `include` (`_include`, `_revinclude`).
+    pub included: Vec<RawResource>,
+    /// OperationOutcomes beside the results (mode `outcome`).
+    pub outcomes: Vec<OperationOutcome>,
+    /// Why each entry whose resource did not read was left out.
+    pub unreadable: Vec<String>,
+    /// This page's `Bundle.total`, when the server counts.
+    pub total: Option<u64>,
+}
+
+/// How a paged search ended: every page it read was handed over first.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SearchEnd {
+    /// Pages read and handed over.
+    pub pages: u32,
+    /// Whether a `next` page was left unread at the page cap, or because it
+    /// named the page just read.
+    pub truncated: bool,
+    /// `Bundle.total` of the first page, when the server counts.
+    pub total: Option<u64>,
+}
+
 /// Reads and searches one FHIR server. Every request goes to the base's own
 /// origin, so the bearer and the extra headers never leave it: a `next` link
 /// or a Binary reference elsewhere is refused. Nothing is printed.
@@ -359,56 +390,93 @@ impl<T: Transport> FhirClient<T> {
     /// `GET <base>/<type>?<params>`, following `Bundle.link[next]` as the
     /// server wrote it, on the base's origin only, up to the page cap. No
     /// parameter is added: `_count`, `patient` and the rest are the caller's.
+    /// Every page is read before this returns, and an error on any page is
+    /// the whole search's; [`Self::search_pages`] keeps the pages before it.
     pub async fn search(
         &self,
         resource_type: &str,
         params: &[(&str, String)],
     ) -> Result<SearchResult, CliError> {
+        let mut result = SearchResult::default();
+        let end = self
+            .search_pages(resource_type, params, |page| {
+                result.resources.extend(page.resources);
+                result.included.extend(page.included);
+                result.outcomes.extend(page.outcomes);
+                result.unreadable.extend(page.unreadable);
+                Ok(())
+            })
+            .await?;
+        result.pages = end.pages;
+        result.truncated = end.truncated;
+        result.total = end.total;
+        Ok(result)
+    }
+
+    /// [`Self::search`], handing each page to `on_page` as it is read, so a
+    /// caller can write it out before the next is asked for. A page that
+    /// fails (an error status after its retries, a body that does not read,
+    /// a `next` link on another server) ends the search with its error, and
+    /// the pages before it have already been handed over: the caller keeps
+    /// them and records the rest as missing. An error from `on_page` ends the
+    /// search too, with no further request.
+    pub async fn search_pages(
+        &self,
+        resource_type: &str,
+        params: &[(&str, String)],
+        mut on_page: impl FnMut(SearchPage) -> Result<(), CliError>,
+    ) -> Result<SearchEnd, CliError> {
         check_type(resource_type)?;
         let mut url = HttpRequest::get(format!("{}/{resource_type}", self.base))
             .query(params)
             .url;
-        let mut result = SearchResult::default();
+        let mut end = SearchEnd::default();
         loop {
             let response = self.get(resource_type, url.clone()).await?;
             if let Some(err) = self.outcome_instead(resource_type, &response.body) {
                 return Err(err);
             }
-            let page = RawBundle::parse(&response.body)?;
-            result.pages += 1;
-            if result.pages == 1 {
-                result.total = page.total;
+            let bundle = RawBundle::parse(&response.body)?;
+            end.pages += 1;
+            if end.pages == 1 {
+                end.total = bundle.total;
             }
-            let next = page.link("next").map(str::to_string);
-            for entry in page.entry {
+            let next = bundle.link("next").map(str::to_string);
+            let mut page = SearchPage {
+                number: end.pages,
+                total: bundle.total,
+                ..SearchPage::default()
+            };
+            for entry in bundle.entry {
                 let mode = entry.search.as_ref().and_then(|s| s.mode.clone());
                 if let Some(why) = entry.unreadable {
-                    result.unreadable.push(why);
+                    page.unreadable.push(why);
                     continue;
                 }
                 let Some(resource) = entry.resource else {
                     continue;
                 };
                 match mode.as_deref() {
-                    Some("include") => result.included.push(resource),
-                    Some("outcome") => result.outcomes.extend(resource.parse_as().ok()),
+                    Some("include") => page.included.push(resource),
+                    Some("outcome") => page.outcomes.extend(resource.parse_as().ok()),
                     _ if resource.resource_type == OperationOutcome::TYPE => {
-                        result.outcomes.extend(resource.parse_as().ok())
+                        page.outcomes.extend(resource.parse_as().ok())
                     }
-                    _ => result.resources.push(resource),
+                    _ => page.resources.push(resource),
                 }
             }
+            on_page(page)?;
             let Some(next) = next else {
                 break;
             };
             if next == url {
                 // The server named a next page and it is this one: stop, and
                 // say pages may be missing rather than loop.
-                result.truncated = true;
+                end.truncated = true;
                 break;
             }
-            if result.pages >= self.page_cap {
-                result.truncated = true;
+            if end.pages >= self.page_cap {
+                end.truncated = true;
                 break;
             }
             if origin_of(&next).as_deref() != Some(self.origin.as_str()) {
@@ -419,7 +487,7 @@ impl<T: Transport> FhirClient<T> {
             }
             url = next;
         }
-        Ok(result)
+        Ok(end)
     }
 
     /// A Binary by its reference: `Binary/<id>`, or an absolute URL on the
@@ -847,6 +915,51 @@ mod tests {
             format!("{BASE}/Observation?patient=p1&_count=1")
         );
         assert_eq!(seen[1].url, "https://fhir.example.test/r4?page=2");
+    }
+
+    #[test]
+    fn a_failed_page_leaves_the_pages_before_it_handed_over() {
+        let c = client(vec![
+            page(&obs("o1"), Some(&format!("{BASE}/Observation?_page=2"))),
+            page(&obs("o2"), Some(&format!("{BASE}/Observation?_page=3"))),
+            HttpResponse::new(500, ""),
+        ])
+        .retry(RetryPolicy::none());
+        let mut got = Vec::new();
+        let err = block_on(c.search_pages("Observation", &[], |page| {
+            got.push((page.number, page.resources[0].id.clone(), page.total));
+            Ok(())
+        }))
+        .unwrap_err();
+        assert_eq!(err.exit_code(), 5);
+        assert_eq!(
+            got,
+            [
+                (1, "o1".to_string(), Some(3)),
+                (2, "o2".to_string(), Some(3))
+            ]
+        );
+    }
+
+    #[test]
+    fn an_error_from_the_caller_stops_the_search_without_another_request() {
+        let c = client(vec![
+            page(&obs("o1"), Some(&format!("{BASE}/Observation?_page=2"))),
+            page(&obs("o2"), None),
+        ]);
+        let err = block_on(c.search_pages("Observation", &[], |_| {
+            Err(CliError::Other("the disc is full".into()))
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("disc is full"), "{err}");
+        assert_eq!(c.transport().seen.borrow().len(), 1);
+
+        let c = client(vec![
+            page(&obs("o1"), Some(&format!("{BASE}/Observation?_page=2"))),
+            page(&obs("o2"), None),
+        ]);
+        let end = block_on(c.search_pages("Observation", &[], |_| Ok(()))).unwrap();
+        assert_eq!((end.pages, end.truncated, end.total), (2, false, Some(3)));
     }
 
     #[test]

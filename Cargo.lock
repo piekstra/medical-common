@@ -1468,7 +1468,7 @@ dependencies = [
 
 [[package]]
 name = "pk-med-dicom"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "flate2",
  "pk-cli-core",
@@ -1477,7 +1477,7 @@ dependencies = [
 
 [[package]]
 name = "pk-med-fhir"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "pk-cli-core",
@@ -1491,7 +1491,7 @@ dependencies = [
 
 [[package]]
 name = "pk-med-records"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "pk-cli-core",
  "pk-cli-http",
@@ -1504,7 +1504,7 @@ dependencies = [
 
 [[package]]
 name = "pk-med-smart"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.4.3",

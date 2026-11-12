@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.4.1 — 2026-11-12
+
+Pins cli-common v0.31.1, as v0.4.0 does. Additions only.
+
+- `pk-med-fhir`: `FhirClient::search_pages(type, &params, on_page)` hands
+  each page to `on_page` as it is read (`SearchPage`) and returns how the
+  search ended (`SearchEnd { pages, truncated, total }`). A failure on a
+  later page leaves the pages before it with the caller, and an error from
+  `on_page` stops the search with no further request. `search` is built on
+  it and behaves as before (DESIGN.md §2.2).
+
 ## v0.4.0 — 2026-11-12
 
 Pins cli-common v0.31.1, as v0.3.0 does.
