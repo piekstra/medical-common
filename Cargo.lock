@@ -1473,8 +1473,6 @@ dependencies = [
  "flate2",
  "pk-cli-core",
  "pk-med-dicom",
- "serde",
- "serde_json",
 ]
 
 [[package]]

@@ -5,7 +5,9 @@ use std::fmt;
 
 use pk_cli_core::CliError;
 
+/// Variants may be added: match with a `_` arm.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum DicomError {
     /// No `DICM` marker after the preamble, and no file meta group at the
     /// start either.
@@ -51,7 +53,22 @@ impl fmt::Display for DicomError {
     }
 }
 
-impl std::error::Error for DicomError {}
+/// The I/O error inside [`DicomError::Io`]; its message is in `Display`
+/// too, for a CLI that prints one line.
+impl std::error::Error for DicomError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            DicomError::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for DicomError {
+    fn from(e: std::io::Error) -> Self {
+        DicomError::Io(e)
+    }
+}
 
 /// [`CliError::Usage`] for a file that is not DICOM, the caller having
 /// pointed at it; [`CliError::Other`] for one that is and does not read.

@@ -15,10 +15,8 @@ test-util = []
 
 [dependencies]
 pk-cli-core = { workspace = true }
-serde = { workspace = true }
 # The deflated transfer syntax (1.2.840.10008.1.2.1.99), read and written.
 flate2 = { workspace = true }
 
 [dev-dependencies]
 pk-med-dicom = { path = ".", features = ["test-util"] }
-serde_json = { workspace = true }

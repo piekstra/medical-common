@@ -5,8 +5,9 @@ use std::fmt;
 
 use crate::tag::{tags, Tag, Vr};
 
-/// An element's value.
+/// An element's value. Variants may be added: match with a `_` arm.
 #[derive(Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Value {
     /// The value's bytes as stored (text padded to an even length, numbers
     /// in the file's byte order).

@@ -649,14 +649,20 @@ transfer syntax.
 - An implicit-VR file names no VRs. A small dictionary gives the VR of each
   tag this crate reads by name; any other tag reads as `UN`, its bytes.
 
-A hostile file cannot cost unbounded memory:
+A hostile file cannot cost unbounded memory or time:
 
 | Limit | Value | Past it |
 |---|---|---|
 | `MAX_VALUE_BYTES`, one text or number value | 16 MiB | refused (`DicomError::Limit`) before anything is allocated |
 | the same, one bulk value (OB, OW, UN, ...) | 16 MiB | skipped (`Value::Skipped`), and reading goes on |
-| `MAX_HEADER_BYTES`, values kept before Pixel Data | 64 MiB | refused |
+| `MAX_HEADER_BYTES`, what a header holds before Pixel Data: its values, and 128 bytes for each element and item | 64 MiB | refused |
+| `MAX_INFLATED_BYTES`, a deflated data set inflated | 256 MiB | refused |
 | `MAX_DEPTH`, sequence nesting | 16 | refused |
+
+A skipped value is read past, never kept, so what it costs is bounded by
+the file's own size, or by `MAX_INFLATED_BYTES` in a deflated one. A
+File Meta Group Length that is negative or overflows is ignored, and the
+meta group is read while its tags are group 0002.
 
 ### 4.2 `Header`
 
@@ -701,9 +707,13 @@ modality }`. The study and series are those of the records above it.
 
 - Records are walked from the First Root Record through each record's
   Lower Level and Next offsets. Offsets count from the file's first byte,
-  preamble included. A cycle is refused. When the offsets are zero, as
-  some writers leave them, the records are read in sequence order instead.
-- A record whose Record In-use Flag is 0 is left out.
+  preamble included. An offset that points at no record, or a cycle, is
+  refused (`DicomError::Malformed`). A record no offset reaches is left
+  out. When the First Root Record is absent or zero, as some writers leave
+  it, the records are read in sequence order instead, each under the last
+  patient, study and series before it.
+- A record whose Record In-use Flag is 0 is left out, as is one whose
+  Referenced File ID is absent, empty or not text.
 - Referenced File ID components (`IMAGES\S1\I1`) are joined under the
   DICOMDIR's directory. A component that is empty, `.` or `..`, absolute,
   or holds a `/` or `:` is refused (`DicomError::Malformed`), so a disc
@@ -718,12 +728,16 @@ Instance UID, in the order each study is first seen:
 - `modalities`, sorted, each once;
 - `series`, each a `SeriesSummary { uid, number, modality, description,
   body_part, instances }`, sorted by series number, with ties keeping the
-  order first seen;
+  order first seen. `uid` is `None` for the files that name no Series
+  Instance UID, grouped together;
 - `instances`: distinct SOP Instance UIDs, so a second copy of a file
   counts once.
 
-A file with no Study Instance UID is left out. A summary holds nothing
-about the patient and serializes as JSON.
+A file with no Study Instance UID is left out. A summary leaves out the
+patient's name, id, birth date and sex. Its UIDs, accession number and date
+still identify one visit, so it is medical data, for the person's own
+terminal and records folder. It is not a wire shape: a CLI that prints one
+wraps it in its own schema-tagged DTO.
 
 ### 4.5 Errors
 
@@ -732,6 +746,9 @@ about the patient and serializes as JSON.
 | `NotDicom`: no `DICM` and no meta group | `Usage` | 2 |
 | `Truncated { offset }`, `Malformed { offset, what }`, `Limit { offset, what }`, `Io` | `Other` | 1 |
 
+`DicomError` and `Value` are `#[non_exhaustive]`: a match needs a `_` arm,
+so a later variant is not a break. `DicomError::Io` returns its
+`io::Error` as `source()`, and `From<io::Error>` makes one.
 `is_dicom(prefix)` tests a file's first 132 bytes, and `is_dicom_file(path)`
 a file's, `false` when it does not open.
 

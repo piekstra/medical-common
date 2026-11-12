@@ -28,3 +28,8 @@ zeroize = "1"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # The mock server's PKCE S256 check (feature test-util only).
 sha2 = "0.11"
+
+# Inflating in tests (pk-med-dicom's deflated syntax and its 256 MiB cap)
+# at release speed.
+[profile.dev.package.miniz_oxide]
+opt-level = 3

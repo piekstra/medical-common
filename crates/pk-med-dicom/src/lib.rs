@@ -20,10 +20,12 @@
 //! - Feature `test-util`: [`synthetic::SyntheticStudy`] writes a synthetic
 //!   study, with a DICOMDIR, for any repository's tests and dogfooding.
 //!
-//! Limits keep a hostile file from costing memory: a text or number value
-//! over [`MAX_VALUE_BYTES`] is refused (a bulk one skipped), a header over
-//! [`MAX_HEADER_BYTES`] before Pixel Data is refused, and sequences nest
-//! [`MAX_DEPTH`] deep at most. Errors name offsets and tags, never a value.
+//! Limits keep a hostile file from costing memory or time: a text or number
+//! value over [`MAX_VALUE_BYTES`] is refused (a bulk one skipped), a header
+//! over [`MAX_HEADER_BYTES`] before Pixel Data is refused (each element and
+//! item counting besides its value), a deflated data set inflates to
+//! [`MAX_INFLATED_BYTES`] at most, and sequences nest [`MAX_DEPTH`] deep at
+//! most. Errors name offsets and tags, never a value.
 
 pub mod dicomdir;
 pub mod error;
@@ -44,10 +46,14 @@ pub use tag::{tags, Tag, Vr};
 /// The longest text or number value read: 16 MiB. A longer bulk value (OB,
 /// OW, UN, ...) is skipped instead.
 pub const MAX_VALUE_BYTES: u64 = 16 * 1024 * 1024;
-/// The most value bytes a header holds before Pixel Data: 64 MiB.
+/// The most a header holds before Pixel Data: 64 MiB of values, each element
+/// and item counting 128 bytes besides its value.
 pub const MAX_HEADER_BYTES: u64 = 64 * 1024 * 1024;
 /// The deepest sequence nesting read.
 pub const MAX_DEPTH: usize = 16;
+/// The most a deflated data set is inflated to before Pixel Data: 256 MiB.
+/// A small file cannot cost more than this to read.
+pub const MAX_INFLATED_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The Media Storage Directory Storage SOP class: a DICOMDIR's, not an
 /// image's.

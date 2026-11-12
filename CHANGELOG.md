@@ -11,17 +11,21 @@ Pins cli-common v0.31.1, as v0.2.0 does.
     little endian, explicit VR big endian, deflated, or a compressed
     syntax's explicit little endian. Sequences of defined and undefined
     length are read, and an undefined-length `UN` is read as a sequence.
-    Reading stops at Pixel Data. Limits on value size, header size and
-    nesting are enforced.
+    Reading stops at Pixel Data. Limits are enforced on value size, header
+    size (each element and item counting 128 bytes), inflated size
+    (256 MiB) and nesting.
   - `Header`: `get(tag) -> Option<&str>` for a `Tag` or `0xGGGGEEEE`,
     `element(tag)`, and typed getters (`study_uid`, `modality`,
     `study_date` as `YYYY-MM-DD`, `patient_name` as a person writes it,
     ...). `Debug` and errors show no value.
   - `read_dicomdir` and `dicomdir_entries`: the files a DICOMDIR names,
-    with their study and series. Records are walked by offset with a cycle
-    check, or in sequence order when the offsets are zero. A path that
-    leaves the disc is refused.
+    with their study and series. Records are walked by offset, refusing a
+    dangling offset or a cycle, or in sequence order when the first root
+    offset is zero. A path that leaves the disc is refused.
   - `StudySummary::from_headers`: studies and series with their counts.
+    It is not a wire shape (no `Serialize`): a CLI wraps it in its own
+    schema-tagged DTO.
+  - `DicomError` and `Value` are `#[non_exhaustive]`.
   - `is_dicom`, `is_dicom_file`, `iso_date`, `person_name`, and
     `MEDIA_STORAGE_DIRECTORY`.
   - Feature `test-util`: `synthetic::SyntheticStudy` writes a synthetic

@@ -2,20 +2,19 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use serde::Serialize;
-
 use crate::header::Header;
 
-/// One study, from the headers of its files. Holds nothing about the patient.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// One study, from the headers of its files. It leaves out the patient's
+/// name, id, birth date and sex, but its UIDs, accession number and date
+/// still identify one visit: it is medical data, for the person's own
+/// terminal and records folder. Not a wire shape: a CLI that prints it
+/// wraps it in its own schema-tagged DTO.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StudySummary {
     pub study_uid: String,
     /// `YYYY-MM-DD`.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub accession_number: Option<String>,
     /// Each series' modality, sorted, once each.
     pub modalities: Vec<String>,
@@ -25,17 +24,13 @@ pub struct StudySummary {
     pub instances: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeriesSummary {
-    /// Series Instance UID; empty for files that name none.
-    pub uid: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Series Instance UID; `None` groups the files that name none.
+    pub uid: Option<String>,
     pub number: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub modality: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub body_part: Option<String>,
     pub instances: usize,
 }
@@ -47,7 +42,7 @@ impl StudySummary {
     pub fn from_headers<'a>(headers: impl IntoIterator<Item = &'a Header>) -> Vec<StudySummary> {
         let mut studies: Vec<StudySummary> = Vec::new();
         let mut study_at: HashMap<String, usize> = HashMap::new();
-        let mut series_at: HashMap<(usize, String), usize> = HashMap::new();
+        let mut series_at: HashMap<(usize, Option<String>), usize> = HashMap::new();
         let mut seen: HashSet<(usize, String)> = HashSet::new();
         for header in headers {
             let Some(study_uid) = header.study_uid().map(str::to_string) else {
@@ -81,7 +76,7 @@ impl StudySummary {
                 }
             }
             study.instances += 1;
-            let series_uid = header.series_uid().unwrap_or_default().to_string();
+            let series_uid = header.series_uid().map(str::to_string);
             let i = *series_at.entry((s, series_uid.clone())).or_insert_with(|| {
                 study.series.push(SeriesSummary {
                     uid: series_uid,

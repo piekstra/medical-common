@@ -314,7 +314,32 @@ fn a_dicomdir_path_that_climbs_out_is_refused() {
             Node::text(tags::REFERENCED_FILE_ID, Vr::CS, file_id),
         ]
     };
-    for bad in ["..\\ETC\\PASSWD", "DICOM\\..\\..\\X", "/ETC", "A/B"] {
+    let good = part10(
+        "1.2.840.10008.1.3.10",
+        "2.25.0.9",
+        TransferSyntax::ExplicitLittle,
+        &[Node::sequence(
+            tags::DIRECTORY_RECORD_SEQUENCE,
+            vec![record("DICOM\\IMG1")],
+            false,
+        )],
+    );
+    let entries = pk_med_dicom::dicomdir_entries(
+        &read_header(&good[..]).unwrap(),
+        std::path::Path::new("/media/disc"),
+    )
+    .unwrap();
+    assert_eq!(entries[0].path, PathBuf::from("/media/disc/DICOM/IMG1"));
+    for bad in [
+        "..\\ETC\\PASSWD",
+        "DICOM\\..\\..\\X",
+        "/ETC",
+        "A/B",
+        "A\\\\B",
+        ".",
+        "C:",
+        "A\u{0}B",
+    ] {
         let bytes = part10(
             "1.2.840.10008.1.3.10",
             "2.25.0.9",
@@ -426,12 +451,12 @@ fn studies_and_series_are_summarized_from_headers() {
         ]
     );
     assert_eq!(studies[0].date.as_deref(), Some("2026-03-04"));
-    assert_eq!(studies[0].series[1].uid, ct.series_uid(2));
+    assert_eq!(studies[0].series[1].uid, Some(ct.series_uid(2)));
     assert_eq!(studies[0].series[0].body_part.as_deref(), Some("ABDOMEN"));
-    let json = serde_json::to_string(&studies).unwrap();
+    let shown = format!("{studies:?}");
     assert!(
-        !json.contains("Testperson") && !json.contains("PID"),
-        "{json}"
+        !shown.contains("Testperson") && !shown.contains("PID"),
+        "{shown}"
     );
 }
 
@@ -533,4 +558,328 @@ fn a_file_that_does_not_open_is_not_dicom() {
     std::fs::write(&pdf, b"%PDF-1.7 not a DICOM file").unwrap();
     assert!(!pk_med_dicom::is_dicom_file(&pdf));
     assert!(!pk_med_dicom::is_dicom_file(dir.0.join("missing")));
+}
+
+/// A Part 10 file from raw meta elements and a raw data set.
+fn raw_file(meta: &[Vec<u8>], dataset: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; 128];
+    out.extend_from_slice(b"DICM");
+    meta.iter().for_each(|e| out.extend_from_slice(e));
+    out.extend_from_slice(dataset);
+    out
+}
+
+/// An explicit VR little endian element with a 2-byte length.
+fn short(group: u16, element: u16, vr: &[u8; 2], value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&group.to_le_bytes());
+    out.extend_from_slice(&element.to_le_bytes());
+    out.extend_from_slice(vr);
+    out.extend_from_slice(&(value.len() as u16).to_le_bytes());
+    out.extend_from_slice(value);
+    out
+}
+
+/// An explicit VR little endian element with a 4-byte length.
+fn long(group: u16, element: u16, vr: &[u8; 2], length: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&group.to_le_bytes());
+    out.extend_from_slice(&element.to_le_bytes());
+    out.extend_from_slice(vr);
+    out.extend_from_slice(&[0, 0]);
+    out.extend_from_slice(&length.to_le_bytes());
+    out
+}
+
+const EXPLICIT: &[u8] = b"1.2.840.10008.1.2.1\0";
+const DEFLATED: &[u8] = b"1.2.840.10008.1.2.1.99";
+
+#[test]
+fn a_meta_group_length_that_is_negative_or_huge_is_ignored() {
+    let modality = short(0x0008, 0x0060, b"CS", b"OT");
+    for length in [
+        short(0x0002, 0x0000, b"SL", &(-1i32).to_le_bytes()),
+        short(0x0002, 0x0000, b"UL", &u32::MAX.to_le_bytes()),
+        short(0x0002, 0x0000, b"IS", b"-1"),
+    ] {
+        let bytes = raw_file(&[length, short(0x0002, 0x0010, b"UI", EXPLICIT)], &modality);
+        let h = read_header(&bytes[..]).unwrap();
+        assert_eq!(h.transfer_syntax(), Some("1.2.840.10008.1.2.1"));
+        assert_eq!(h.modality(), Some("OT"));
+    }
+}
+
+#[test]
+fn a_meta_group_without_a_transfer_syntax_is_malformed() {
+    let bytes = raw_file(
+        &[short(0x0002, 0x0002, b"UI", b"1.2.840.10008.5.1.4.1.1.7\0")],
+        &short(0x0008, 0x0060, b"CS", b"OT"),
+    );
+    let err = read_header(&bytes[..]).unwrap_err();
+    assert!(
+        matches!(&err, DicomError::Malformed { what, .. } if what.contains("transfer syntax")),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_deflated_data_set_that_does_not_inflate_is_malformed() {
+    let bytes = raw_file(&[short(0x0002, 0x0010, b"UI", DEFLATED)], &[0xFF; 64]);
+    let err = read_header(&bytes[..]).unwrap_err();
+    assert!(
+        matches!(&err, DicomError::Malformed { what, .. } if what.contains("inflate")),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_deflated_data_set_inflates_to_its_limit_and_no_further() {
+    use std::io::Write;
+    // A bulk element claiming nearly 4 GiB, then zeros: a few hundred KiB
+    // that would inflate past the limit while the element is skipped.
+    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder
+        .write_all(&long(0x0009, 0x1001, b"OB", 0xFFFF_FFF0))
+        .unwrap();
+    let zeros = vec![0u8; 1024 * 1024];
+    for _ in 0..(pk_med_dicom::MAX_INFLATED_BYTES / (1024 * 1024) + 8) {
+        encoder.write_all(&zeros).unwrap();
+    }
+    let deflated = encoder.finish().unwrap();
+    let bytes = raw_file(&[short(0x0002, 0x0010, b"UI", DEFLATED)], &deflated);
+    let err = read_header(&bytes[..]).unwrap_err();
+    assert!(
+        matches!(&err, DicomError::Limit { what, .. } if what.contains("256 MiB")),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_header_over_its_limit_is_refused_by_values_or_by_elements() {
+    // Five values of 14 MiB: each under the value limit, 70 MiB together.
+    let mut values = Vec::new();
+    for i in 0..5u16 {
+        values.extend_from_slice(&long(0x0009, 0x1001 + i, b"OB", 14 * 1024 * 1024));
+        values.resize(values.len() + 14 * 1024 * 1024, 0);
+    }
+    let err = read_header(&le(&[Node::Raw(values)])[..]).unwrap_err();
+    assert!(
+        matches!(&err, DicomError::Limit { what, .. } if what.contains("64 MiB")),
+        "{err}"
+    );
+
+    // 600,000 empty elements: 4.8 MB of file, each costing its 128 bytes.
+    let empty = short(0x0009, 0x1001, b"LO", b"");
+    let elements = empty.repeat(600_000);
+    let err = read_header(&le(&[Node::Raw(elements)])[..]).unwrap_err();
+    assert!(
+        matches!(&err, DicomError::Limit { what, .. } if what.contains("64 MiB")),
+        "{err}"
+    );
+}
+
+#[test]
+fn malformed_structure_is_refused_where_it_is() {
+    let mut item_past_sequence = long(0x0008, 0x1115, b"SQ", 8);
+    item_past_sequence.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 100, 0, 0, 0]);
+
+    let mut element_past_item = long(0x0008, 0x1115, b"SQ", 0xFFFF_FFFF);
+    element_past_item.extend_from_slice(&[0xFE, 0xFF, 0x00, 0xE0, 4, 0, 0, 0]);
+    element_past_item.extend_from_slice(&short(0x0008, 0x0060, b"CS", b"OT"));
+    element_past_item.extend_from_slice(&[0xFE, 0xFF, 0xDD, 0xE0, 0, 0, 0, 0]);
+
+    let text_of_undefined_length = long(0x0008, 0x1030, b"UT", 0xFFFF_FFFF);
+
+    let mut not_fragments = long(0x0009, 0x1001, b"OB", 0xFFFF_FFFF);
+    not_fragments.extend_from_slice(&short(0x0008, 0x0060, b"CS", b"OT"));
+
+    for (raw, what) in [
+        (item_past_sequence, "past the end of its sequence"),
+        (element_past_item, "past the end of its item"),
+        (text_of_undefined_length, "undefined length"),
+        (not_fragments, "not fragments"),
+    ] {
+        let err = read_header(&le(&[Node::Raw(raw)])[..]).unwrap_err();
+        assert!(
+            matches!(&err, DicomError::Malformed { what: w, .. } if w.contains(what)),
+            "{what}: {err}"
+        );
+    }
+}
+
+#[test]
+fn short_input_is_not_dicom() {
+    for bytes in [&b""[..], b"DICM", &[0u8; 131][..]] {
+        assert!(matches!(
+            read_header(bytes).unwrap_err(),
+            DicomError::NotDicom
+        ));
+        assert!(!pk_med_dicom::is_dicom(bytes));
+    }
+}
+
+#[test]
+fn a_file_cut_anywhere_is_an_error_or_a_header_never_a_panic() {
+    for syntax in ALL {
+        let dir = Scratch(scratch("cuts"));
+        let files = SyntheticStudy::new("CT")
+            .transfer_syntax(syntax)
+            .write_to(&dir.0)
+            .unwrap();
+        let bytes = std::fs::read(&files[0]).unwrap();
+        for cut in (0..bytes.len()).step_by(3) {
+            match read_header(&bytes[..cut]) {
+                // A cut between two top-level elements reads as a header
+                // that ends there, as a file without Pixel Data does.
+                Ok(_) => {}
+                Err(DicomError::Io(e)) => panic!("{syntax:?} cut at {cut}: I/O {e}"),
+                Err(e) => {
+                    let text = e.to_string();
+                    assert!(!text.contains("Test"), "{syntax:?} cut at {cut}: {text}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn defined_length_sequences_read_in_every_syntax() {
+    for syntax in ALL {
+        let bytes = part10(
+            "1.2.840.10008.5.1.4.1.1.7",
+            "2.25.0.9",
+            syntax,
+            &[
+                Node::sequence(
+                    tags::REFERENCED_STUDY_SEQUENCE,
+                    vec![
+                        vec![Node::uid(tags::REFERENCED_SOP_INSTANCE_UID, "2.25.0.3")],
+                        vec![],
+                    ],
+                    false,
+                ),
+                Node::us(tags::ROWS, 513),
+            ],
+        );
+        let h = read_header(&bytes[..]).unwrap();
+        let items = h.dataset().items(tags::REFERENCED_STUDY_SEQUENCE);
+        assert_eq!(items.len(), 2, "{syntax:?}");
+        assert_eq!(
+            items[0]
+                .string(tags::REFERENCED_SOP_INSTANCE_UID)
+                .as_deref(),
+            Some("2.25.0.3"),
+            "{syntax:?}"
+        );
+        assert_eq!(h.rows(), Some(513), "{syntax:?}");
+    }
+}
+
+fn dicomdir(first_root: u32, records: Vec<Vec<Node>>) -> pk_med_dicom::Header {
+    let bytes = part10(
+        "1.2.840.10008.1.3.10",
+        "2.25.0.9",
+        TransferSyntax::ExplicitLittle,
+        &[
+            Node::ul(tags::FIRST_ROOT_RECORD, first_root),
+            Node::sequence(tags::DIRECTORY_RECORD_SEQUENCE, records, false),
+        ],
+    );
+    read_header(&bytes[..]).unwrap()
+}
+
+fn record(kind: &str, extra: Vec<Node>) -> Vec<Node> {
+    let mut nodes = vec![
+        Node::ul(tags::NEXT_RECORD, 0),
+        Node::us(tags::RECORD_IN_USE, 0xFFFF),
+        Node::ul(tags::LOWER_RECORD, 0),
+        Node::text(tags::RECORD_TYPE, Vr::CS, kind),
+    ];
+    nodes.extend(extra);
+    nodes
+}
+
+#[test]
+fn records_in_order_take_the_study_and_series_above_them() {
+    let image = |file: &str| {
+        record(
+            "IMAGE",
+            vec![Node::text(tags::REFERENCED_FILE_ID, Vr::CS, file)],
+        )
+    };
+    let h = dicomdir(
+        0,
+        vec![
+            record("PATIENT", vec![]),
+            record(
+                "STUDY",
+                vec![Node::uid(tags::STUDY_INSTANCE_UID, "2.25.0.1")],
+            ),
+            record(
+                "SERIES",
+                vec![
+                    Node::uid(tags::SERIES_INSTANCE_UID, "2.25.0.1.1"),
+                    Node::text(tags::MODALITY, Vr::CS, "CT"),
+                ],
+            ),
+            image("A"),
+            // No file named, or not as text: left out.
+            record("IMAGE", vec![]),
+            record("IMAGE", vec![Node::us(tags::REFERENCED_FILE_ID, 7)]),
+            // A second patient: nothing of the first carries over.
+            record("PATIENT", vec![]),
+            record(
+                "STUDY",
+                vec![Node::uid(tags::STUDY_INSTANCE_UID, "2.25.0.2")],
+            ),
+            image("B"),
+        ],
+    );
+    let entries = pk_med_dicom::dicomdir_entries(&h, std::path::Path::new("/disc")).unwrap();
+    let seen: Vec<_> = entries
+        .iter()
+        .map(|e| {
+            (
+                e.path.clone(),
+                e.study_uid.clone(),
+                e.series_uid.clone(),
+                e.modality.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            (
+                PathBuf::from("/disc/A"),
+                Some("2.25.0.1".to_string()),
+                Some("2.25.0.1.1".to_string()),
+                Some("CT".to_string())
+            ),
+            (
+                PathBuf::from("/disc/B"),
+                Some("2.25.0.2".to_string()),
+                None,
+                None
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_first_root_offset_that_points_at_no_record_is_refused() {
+    let h = dicomdir(12_345, vec![record("PATIENT", vec![])]);
+    let err = pk_med_dicom::dicomdir_entries(&h, std::path::Path::new("/disc")).unwrap_err();
+    assert!(
+        matches!(&err, DicomError::Malformed { what, .. } if what.contains("first root")),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_io_error_is_the_errors_source() {
+    use std::error::Error;
+    let err = DicomError::from(std::io::Error::other("disc ejected"));
+    assert!(err.source().is_some());
+    assert!(DicomError::NotDicom.source().is_none());
 }

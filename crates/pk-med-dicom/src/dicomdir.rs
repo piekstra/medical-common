@@ -66,7 +66,10 @@ fn record_type(record: &Dataset) -> String {
 
 /// The files a DICOMDIR header names, under `root`. Records are walked by
 /// their offsets (first root record, next, lower level) when the header has
-/// them, else in sequence order. Records marked not in use are left out.
+/// them, else in sequence order; an offset that points at no record is
+/// refused, and a record no offset reaches is left out. Records marked not
+/// in use are left out, as are records whose Referenced File ID is absent,
+/// empty or not text.
 pub fn dicomdir_entries(header: &Header, root: &Path) -> Result<Vec<DicomDirEntry>, DicomError> {
     let Some(sequence) = header.dataset().get(tags::DIRECTORY_RECORD_SEQUENCE) else {
         return Err(DicomError::Malformed {
@@ -80,11 +83,18 @@ pub fn dicomdir_entries(header: &Header, root: &Path) -> Result<Vec<DicomDirEntr
         .enumerate()
         .map(|(i, r)| (r.offset(), i))
         .collect();
-    let first = header
-        .dataset()
-        .int(tags::FIRST_ROOT_RECORD)
-        .and_then(|o| u64::try_from(o).ok())
-        .and_then(|o| by_offset.get(&o).copied());
+    let first = match header.dataset().int(tags::FIRST_ROOT_RECORD) {
+        None | Some(0) => None,
+        Some(offset) => Some(
+            u64::try_from(offset)
+                .ok()
+                .and_then(|o| by_offset.get(&o).copied())
+                .ok_or_else(|| DicomError::Malformed {
+                    offset: 0,
+                    what: "the first root record's offset points at no record".into(),
+                })?,
+        ),
+    };
 
     let walked = match first {
         Some(first) => walk(records, &by_offset, first)?,
@@ -96,8 +106,13 @@ pub fn dicomdir_entries(header: &Header, root: &Path) -> Result<Vec<DicomDirEntr
         if record.int(tags::RECORD_IN_USE) == Some(0) {
             continue;
         }
-        let components = record.strings(tags::REFERENCED_FILE_ID);
-        if components.is_empty() {
+        // A Referenced File ID that is not text names no file.
+        let components = record
+            .get(tags::REFERENCED_FILE_ID)
+            .filter(|e| e.vr.is_text())
+            .map(crate::Element::strings)
+            .unwrap_or_default();
+        if components.is_empty() || components == [""] {
             continue;
         }
         let mut path = root.to_path_buf();

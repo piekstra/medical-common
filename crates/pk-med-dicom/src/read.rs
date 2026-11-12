@@ -7,9 +7,75 @@ use std::io::{self, Read};
 use crate::error::DicomError;
 use crate::header::{Dataset, Element, Header, Value};
 use crate::tag::{implicit_vr, tags, Tag, Vr};
-use crate::{transfer_syntax, MAX_DEPTH, MAX_HEADER_BYTES, MAX_VALUE_BYTES};
+use crate::{transfer_syntax, MAX_DEPTH, MAX_HEADER_BYTES, MAX_INFLATED_BYTES, MAX_VALUE_BYTES};
 
 const UNDEFINED: u32 = 0xFFFF_FFFF;
+
+/// What each element and item counts against [`MAX_HEADER_BYTES`] besides
+/// its value: about what it costs in memory, so a file of empty elements
+/// is bounded as one of large values is.
+const ELEMENT_COST: u64 = 128;
+
+/// Why the inflated data set stopped: marked so it reads as a DICOM error,
+/// not an I/O one.
+#[derive(Debug)]
+enum InflateError {
+    TooLarge,
+    Corrupt,
+}
+
+impl std::fmt::Display for InflateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            InflateError::TooLarge => "the deflated data set inflates past its limit",
+            InflateError::Corrupt => "the deflated data set does not inflate",
+        })
+    }
+}
+
+impl std::error::Error for InflateError {}
+
+/// A deflated data set, inflated up to [`MAX_INFLATED_BYTES`].
+struct Inflating<R: Read> {
+    inner: flate2::read::DeflateDecoder<R>,
+    out: u64,
+}
+
+impl<R: Read> Read for Inflating<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.out >= MAX_INFLATED_BYTES {
+            return Err(io::Error::other(InflateError::TooLarge));
+        }
+        let room = (MAX_INFLATED_BYTES - self.out).min(buf.len() as u64) as usize;
+        let n = self.inner.read(&mut buf[..room]).map_err(|e| {
+            if e.kind() == io::ErrorKind::Interrupted {
+                e
+            } else {
+                io::Error::other(InflateError::Corrupt)
+            }
+        })?;
+        self.out += n as u64;
+        Ok(n)
+    }
+}
+
+/// An I/O error as a DICOM error: the inflater's own are a limit or a
+/// malformed file.
+fn io_error(e: io::Error, offset: u64) -> DicomError {
+    match e.get_ref().and_then(|i| i.downcast_ref::<InflateError>()) {
+        Some(InflateError::TooLarge) => DicomError::Limit {
+            offset,
+            what: "a deflated data set inflating past 256 MiB",
+        },
+        Some(InflateError::Corrupt) => {
+            malformed(offset, "a deflated data set that does not inflate")
+        }
+        None => DicomError::Io(e),
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Syntax {
@@ -52,7 +118,7 @@ impl<'a> Input<'a> {
                 Ok(0) => break,
                 Ok(n) => got += n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(DicomError::Io(e)),
+                Err(e) => return Err(io_error(e, self.pos)),
             }
         }
         Ok(got)
@@ -66,10 +132,21 @@ impl<'a> Input<'a> {
     }
 
     fn unread(&mut self, bytes: &[u8]) {
-        let mut back = bytes.to_vec();
-        back.extend_from_slice(&self.back[self.back_at..]);
-        self.back = back;
-        self.back_at = 0;
+        if self.back_at >= bytes.len() {
+            // What was taken back was the end of what was handed out.
+            self.back_at -= bytes.len();
+            self.back[self.back_at..self.back_at + bytes.len()].copy_from_slice(bytes);
+        } else if self.back_at == self.back.len() {
+            // Nothing pushed back is left: reuse the buffer.
+            self.back.clear();
+            self.back.extend_from_slice(bytes);
+            self.back_at = 0;
+        } else {
+            let mut back = bytes.to_vec();
+            back.extend_from_slice(&self.back[self.back_at..]);
+            self.back = back;
+            self.back_at = 0;
+        }
         self.pos -= bytes.len() as u64;
     }
 
@@ -103,8 +180,8 @@ impl<'a> Input<'a> {
     }
 
     fn skip(&mut self, n: u64, began: u64) -> Result<(), DicomError> {
-        let copied =
-            io::copy(&mut self.by_ref().take(n), &mut io::sink()).map_err(DicomError::Io)?;
+        let copied = io::copy(&mut self.by_ref().take(n), &mut io::sink())
+            .map_err(|e| io_error(e, began))?;
         if copied < n {
             return Err(DicomError::Truncated { offset: began });
         }
@@ -117,7 +194,7 @@ impl<'a> Input<'a> {
         self.by_ref()
             .take(n)
             .read_to_end(&mut value)
-            .map_err(DicomError::Io)?;
+            .map_err(|e| io_error(e, began))?;
         if (value.len() as u64) < n {
             return Err(DicomError::Truncated { offset: began });
         }
@@ -168,6 +245,18 @@ fn malformed(offset: u64, what: impl Into<String>) -> DicomError {
 }
 
 impl<'a> Parser<'a> {
+    /// Count `n` bytes against [`MAX_HEADER_BYTES`].
+    fn charge(&mut self, n: u64, offset: u64) -> Result<(), DicomError> {
+        self.retained = self.retained.saturating_add(n);
+        if self.retained > MAX_HEADER_BYTES {
+            return Err(DicomError::Limit {
+                offset,
+                what: "a header holding over 64 MiB before Pixel Data",
+            });
+        }
+        Ok(())
+    }
+
     fn tag(&mut self, syntax: Syntax, began: u64) -> Result<Tag, DicomError> {
         let group = self.input.u16(syntax.big_endian, began)?;
         let element = self.input.u16(syntax.big_endian, began)?;
@@ -239,6 +328,7 @@ impl<'a> Parser<'a> {
                 return Ok((dataset, true));
             }
             let (vr, length) = self.vr_and_length(tag, syntax, began)?;
+            self.charge(ELEMENT_COST, began)?;
             let value = self.value(tag, vr, length, syntax, depth, began)?;
             dataset.insert(Element {
                 tag,
@@ -279,7 +369,7 @@ impl<'a> Parser<'a> {
         }
         let length = u64::from(length);
         if vr == Vr::SQ {
-            let end = self.input.pos + length;
+            let end = self.input.pos.saturating_add(length);
             return Ok(Value::Sequence(self.items(syntax, Some(end), depth + 1)?));
         }
         if length > MAX_VALUE_BYTES {
@@ -292,13 +382,7 @@ impl<'a> Parser<'a> {
                 what: "a text or number element over 16 MiB",
             });
         }
-        self.retained += length;
-        if self.retained > MAX_HEADER_BYTES {
-            return Err(DicomError::Limit {
-                offset: began,
-                what: "a header holding over 64 MiB before Pixel Data",
-            });
-        }
+        self.charge(length, began)?;
         Ok(Value::Bytes(self.input.value_bytes(length, began)?))
     }
 
@@ -331,6 +415,9 @@ impl<'a> Parser<'a> {
             let began = self.input.pos;
             let tag = self.tag(syntax, began)?;
             let length = self.input.u32(syntax.big_endian, began)?;
+            if tag == tags::ITEM {
+                self.charge(ELEMENT_COST, began)?;
+            }
             match tag {
                 tags::SEQUENCE_DELIMITATION if end.is_none() => break,
                 tags::ITEM if length == UNDEFINED => {
@@ -338,7 +425,7 @@ impl<'a> Parser<'a> {
                     items.push(item);
                 }
                 tags::ITEM => {
-                    let item_end = self.input.pos + u64::from(length);
+                    let item_end = self.input.pos.saturating_add(u64::from(length));
                     if end.is_some_and(|end| item_end > end) {
                         return Err(malformed(
                             began,
@@ -416,6 +503,7 @@ pub fn read_header<R: Read>(reader: R) -> Result<Header, DicomError> {
         let began = parser.input.pos;
         let tag = parser.tag(EXPLICIT_LE, began)?;
         let (vr, length) = parser.vr_and_length(tag, EXPLICIT_LE, began)?;
+        parser.charge(ELEMENT_COST, began)?;
         let value = parser.value(tag, vr, length, EXPLICIT_LE, 0, began)?;
         let element = Element {
             tag,
@@ -424,7 +512,12 @@ pub fn read_header<R: Read>(reader: R) -> Result<Header, DicomError> {
             big_endian: false,
         };
         if tag == tags::FILE_META_GROUP_LENGTH {
-            meta_end = element.int().map(|n| parser.input.pos + n as u64);
+            // A length that is negative or overflows is ignored, and the
+            // meta group is read while its tags are group 0002.
+            meta_end = element
+                .int()
+                .and_then(|n| u64::try_from(n).ok())
+                .and_then(|n| parser.input.pos.checked_add(n));
         }
         meta.insert(element);
     }
@@ -447,7 +540,10 @@ pub fn read_header<R: Read>(reader: R) -> Result<Header, DicomError> {
     };
     if transfer_syntax == transfer_syntax::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN {
         let rest = parser.input.rest();
-        parser.input = Input::new(flate2::read::DeflateDecoder::new(rest));
+        parser.input = Input::new(Inflating {
+            inner: flate2::read::DeflateDecoder::new(rest),
+            out: 0,
+        });
     }
     let start = parser.input.pos;
     let (dataset, has_pixel_data) = parser.dataset(syntax, End::Input, 0, true, start)?;
