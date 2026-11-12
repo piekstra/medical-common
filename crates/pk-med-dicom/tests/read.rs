@@ -883,3 +883,53 @@ fn an_io_error_is_the_errors_source() {
     assert!(err.source().is_some());
     assert!(DicomError::NotDicom.source().is_none());
 }
+
+/// Bytes that end with an I/O error instead of their end.
+struct Failing {
+    bytes: Vec<u8>,
+    at: usize,
+}
+
+impl std::io::Read for Failing {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.at == self.bytes.len() {
+            return Err(std::io::Error::other("the disc stopped answering"));
+        }
+        let n = buf.len().min(self.bytes.len() - self.at);
+        buf[..n].copy_from_slice(&self.bytes[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+#[test]
+fn a_deflated_file_that_fails_or_stops_is_io_or_truncated_not_malformed() {
+    let dir = Scratch(scratch("deflated-cut"));
+    let files = SyntheticStudy::new("CT")
+        .transfer_syntax(TransferSyntax::Deflated)
+        .write_to(&dir.0)
+        .unwrap();
+    let bytes = std::fs::read(&files[0]).unwrap();
+    let half = bytes[..bytes.len() / 2].to_vec();
+    let meta_end = 144 + u32::from_le_bytes(bytes[140..144].try_into().unwrap()) as usize;
+    assert!(
+        half.len() > meta_end + 16,
+        "the cut falls in the deflated data set"
+    );
+
+    let err = read_header(Failing {
+        bytes: half.clone(),
+        at: 0,
+    })
+    .unwrap_err();
+    assert!(
+        matches!(&err, DicomError::Io(e) if e.to_string().contains("stopped answering")),
+        "{err:?}"
+    );
+
+    match read_header(&half[..]) {
+        Ok(h) => assert!(!h.has_pixel_data()),
+        Err(DicomError::Truncated { .. }) => {}
+        Err(e) => panic!("a cut deflated file reads as cut, not {e:?}"),
+    }
+}

@@ -25,7 +25,9 @@ Pins cli-common v0.31.1, as v0.2.0 does.
   - `StudySummary::from_headers`: studies and series with their counts.
     It is not a wire shape (no `Serialize`): a CLI wraps it in its own
     schema-tagged DTO.
-  - `DicomError` and `Value` are `#[non_exhaustive]`.
+  - `DicomError` and `Value` are `#[non_exhaustive]`. In a deflated data
+    set, a stream that does not inflate is `Malformed`, and an error of the
+    file under it stays `Io`.
   - `is_dicom`, `is_dicom_file`, `iso_date`, `person_name`, and
     `MEDIA_STORAGE_DIRECTORY`.
   - Feature `test-util`: `synthetic::SyntheticStudy` writes a synthetic

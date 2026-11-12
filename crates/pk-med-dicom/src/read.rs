@@ -35,10 +35,44 @@ impl std::fmt::Display for InflateError {
 
 impl std::error::Error for InflateError {}
 
+/// An error of the file under a deflated data set, marked so that
+/// [`Inflating`] can tell it from the decoder's own and hand it back as it
+/// was.
+#[derive(Debug)]
+struct SourceError(io::Error);
+
+impl std::fmt::Display for SourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for SourceError {}
+
+/// The file under a deflated data set, its errors marked.
+struct Source<R: Read>(R);
+
+impl<R: Read> Read for Source<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0
+            .read(buf)
+            .map_err(|e| io::Error::new(e.kind(), SourceError(e)))
+    }
+}
+
 /// A deflated data set, inflated up to [`MAX_INFLATED_BYTES`].
 struct Inflating<R: Read> {
-    inner: flate2::read::DeflateDecoder<R>,
+    inner: flate2::read::DeflateDecoder<Source<R>>,
     out: u64,
+}
+
+impl<R: Read> Inflating<R> {
+    fn new(file: R) -> Self {
+        Inflating {
+            inner: flate2::read::DeflateDecoder::new(Source(file)),
+            out: 0,
+        }
+    }
 }
 
 impl<R: Read> Read for Inflating<R> {
@@ -50,13 +84,22 @@ impl<R: Read> Read for Inflating<R> {
             return Err(io::Error::other(InflateError::TooLarge));
         }
         let room = (MAX_INFLATED_BYTES - self.out).min(buf.len() as u64) as usize;
-        let n = self.inner.read(&mut buf[..room]).map_err(|e| {
-            if e.kind() == io::ErrorKind::Interrupted {
-                e
-            } else {
-                io::Error::other(InflateError::Corrupt)
+        let n = match self.inner.read(&mut buf[..room]) {
+            Ok(n) => n,
+            // The file's own error, as it was: a failing disc is I/O, not
+            // a malformed file.
+            Err(e) if e.get_ref().is_some_and(|i| i.is::<SourceError>()) => {
+                return Err(e
+                    .into_inner()
+                    .and_then(|i| i.downcast::<SourceError>().ok())
+                    .map_or_else(|| io::ErrorKind::Other.into(), |s| s.0));
             }
-        })?;
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => return Err(e),
+            // The stream stops before its end: the data set ends there, and
+            // reads as a plain file cut at the same place does.
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => 0,
+            Err(_) => return Err(io::Error::other(InflateError::Corrupt)),
+        };
         self.out += n as u64;
         Ok(n)
     }
@@ -540,10 +583,7 @@ pub fn read_header<R: Read>(reader: R) -> Result<Header, DicomError> {
     };
     if transfer_syntax == transfer_syntax::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN {
         let rest = parser.input.rest();
-        parser.input = Input::new(Inflating {
-            inner: flate2::read::DeflateDecoder::new(rest),
-            out: 0,
-        });
+        parser.input = Input::new(Inflating::new(rest));
     }
     let start = parser.input.pos;
     let (dataset, has_pixel_data) = parser.dataset(syntax, End::Input, 0, true, start)?;

@@ -746,6 +746,10 @@ wraps it in its own schema-tagged DTO.
 | `NotDicom`: no `DICM` and no meta group | `Usage` | 2 |
 | `Truncated { offset }`, `Malformed { offset, what }`, `Limit { offset, what }`, `Io` | `Other` | 1 |
 
+In a deflated data set, a stream that does not inflate is `Malformed`, one
+that stops before its end is `Truncated` as a cut plain file is, and an
+error of the file under it is `Io`, unchanged.
+
 `DicomError` and `Value` are `#[non_exhaustive]`: a match needs a `_` arm,
 so a later variant is not a break. `DicomError::Io` returns its
 `io::Error` as `source()`, and `From<io::Error>` makes one.
