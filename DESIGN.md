@@ -3,7 +3,7 @@
 Status: v0.1.0 ships `pk-med-records` and `pk-med-fhir`; v0.2.0 adds
 `pk-med-smart` (SMART App Launch, §3); v0.3.0 adds `pk-med-dicom` (DICOM
 headers, §4); v0.4.0 adds the OpenID nonce (§3.1) and a vendor's retry
-guidance (§2.2).
+guidance (§2.2); v0.4.1 adds `search_pages` (§2.2).
 
 This document is the specification of the profile, in the style of
 cli-common's domain profiles (`documents/v1`, `utility/v1`, cli-common
@@ -345,7 +345,8 @@ code runs over `pk_cli_http::BlockingTransport` (driven with
 `pk_cli_core::block_on`) and any other transport.
 
 - `read(type, id)`, `read_as::<R>(id)`, `search(type, &params)`,
-  `binary(reference)`, `get_raw(path)`.
+  `search_pages(type, &params, on_page)`, `binary(reference)`,
+  `get_raw(path)`.
 - `search` adds no parameter of its own, follows `Bundle.link[next]` as the
   server wrote it, up to a page cap (`page_cap`, default 100), and reports
   `pages`, `truncated` (pages left at the cap), `total`, and its entries
@@ -354,6 +355,14 @@ code runs over `pk_cli_http::BlockingTransport` (driven with
   object, no string `resourceType`) costs only itself: it is left out, and
   why is in `unreadable`, naming no value of it. `RawBundle::parse` keeps
   such an entry with `RawEntry::unreadable` set.
+- `search_pages` is the same search, handing each `SearchPage { number,
+  resources, included, outcomes, unreadable, total }` to `on_page` as it is
+  read, and returning `SearchEnd { pages, truncated, total }`. A page that
+  fails ends the search with its error after the pages before it were
+  handed over, so an export keeps them and records one `Skip` for the
+  rest. An error from `on_page` (a full disc) ends it with no further
+  request. `search` is `search_pages` collecting every page, so an error on
+  any page there is the whole search's.
 - The bearer is fixed (`bearer(Secret)`) or comes from a source
   (`bearer_with`), for a run longer than the token lasts. A source is
   called before every request, a retry included, with no argument. After
@@ -815,10 +824,10 @@ them at run time.
 Pin a tag, never a branch or a path:
 
 ```toml
-pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.0" }
-pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.0" }
-pk-med-smart = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.0" }   # features = ["rsa"] for §3.4
-pk-med-dicom = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.0" }   # features = ["test-util"] for §4.6
+pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.1" }
+pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.1" }
+pk-med-smart = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.1" }   # features = ["rsa"] for §3.4
+pk-med-dicom = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.1" }   # features = ["test-util"] for §4.6
 ```
 
 Each medical-common tag pins one cli-common tag for every `pk-cli-*` crate,
@@ -832,3 +841,4 @@ does not convert to the other.
 | v0.2.0 | v0.31.1 |
 | v0.3.0 | v0.31.1 |
 | v0.4.0 | v0.31.1 |
+| v0.4.1 | v0.31.1 |
