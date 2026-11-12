@@ -36,9 +36,12 @@ profile in `info` (`profiles: ["health-records/v1", "documents/v1"]`).
 - `orgs search` matches `name`, `aliases` and `location`, case-insensitive.
 - `--patient` takes a `PatientContext.id`, or its `label`. With one
   context signed in, it may be omitted.
-- `--since` bounds each search by the date element FHIR defines for the
-  type (`date`, `_lastUpdated` where a type has none). It never drops a
-  resource the source returns.
+- `--since` bounds each search by the date parameter the source documents
+  for the type (`date` on Observation, DiagnosticReport, DocumentReference,
+  Encounter, Immunization and Procedure at Epic), and leaves a type the
+  source documents none for unbounded rather than guess one (`_lastUpdated`
+  can turn a whole search into a 400). It never drops a resource the
+  source returns.
 - An insurer CLI's export carries `Coverage` and `ExplanationOfBenefit`
   (CARIN Blue Button). A CLI whose source is not a FHIR server (a member
   site, downloaded files) maps what it reads into those FHIR shapes and sets
@@ -356,4 +359,4 @@ does not convert to the other.
 
 | medical-common | cli-common |
 |---|---|
-| v0.1.0 | v0.29.0 |
+| v0.1.0 | v0.31.0 |

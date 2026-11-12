@@ -2,7 +2,7 @@
 
 ## v0.1.0 — 2026-11-12
 
-First release. Pins cli-common v0.29.0.
+First release. Pins cli-common v0.31.0.
 
 - `pk-med-records`: the `health-records/v1` profile (DESIGN.md §1).
   `Organization` (`org-list/v1`), `PatientContext` (`patient-list/v1`),
