@@ -73,11 +73,9 @@ impl ExportFile {
             .map_err(|e| CliError::Other(format!("creating {}: {e}", target.display())))?;
         self.done = true;
         if finished.trailer.complete {
-            let stale = self.path.with_file_name(INCOMPLETE_FILE);
-            if std::fs::symlink_metadata(&stale).is_ok() {
-                std::fs::remove_file(&stale)
-                    .map_err(|e| CliError::Other(format!("removing {}: {e}", stale.display())))?;
-            }
+            // Best effort: the export is committed either way, and an
+            // incomplete file left over is replaced by the next one.
+            let _ = std::fs::remove_file(self.path.with_file_name(INCOMPLETE_FILE));
         }
         // The rename is durable once the directory is. A filesystem that
         // cannot sync a directory has still renamed the file.
@@ -142,14 +140,10 @@ pub fn create_export_file(dir: &Path) -> Result<ExportFile, CliError> {
             path.display()
         )));
     }
-    let (temporary, file) = create_new_beside(dir)?;
-    // Held until the file is committed or the process ends, so another
-    // export can tell a leftover from a file being written.
-    file.try_lock().map_err(|e| {
-        let _ = std::fs::remove_file(&temporary);
-        CliError::Other(format!("locking {}: {e}", temporary.display()))
-    })?;
-    remove_leftovers(dir, &temporary, &file);
+    let (temporary, file, locked) = create_locked_beside(dir)?;
+    if locked {
+        remove_leftovers(dir, &temporary, &file);
+    }
     let export = ExportFile {
         path,
         temporary,
@@ -169,6 +163,53 @@ pub fn create_export_file(dir: &Path) -> Result<ExportFile, CliError> {
             })?;
     }
     Ok(export)
+}
+
+/// A new file in `dir`, locked until it is committed or the process ends so
+/// another export can tell it from a leftover. Between the create and the
+/// lock, another export's sweep can take it for a leftover and remove it;
+/// the file is then made again. Returns whether it is locked: on a
+/// filesystem without locks (some network mounts) it is not, and no
+/// leftovers are swept, since none could be told from a live export.
+fn create_locked_beside(dir: &Path) -> Result<(PathBuf, File, bool), CliError> {
+    for _ in 0..8 {
+        let (temporary, file) = create_new_beside(dir)?;
+        match file.try_lock() {
+            Ok(()) if still_named(&temporary, &file) => return Ok((temporary, file, true)),
+            // Swept before the lock: the name is gone.
+            Ok(()) => continue,
+            // A sweep holds it and is removing it.
+            Err(std::fs::TryLockError::WouldBlock) => {
+                if still_named(&temporary, &file) {
+                    let _ = std::fs::remove_file(&temporary);
+                }
+                continue;
+            }
+            Err(std::fs::TryLockError::Error(_)) => return Ok((temporary, file, false)),
+        }
+    }
+    Err(CliError::Other(format!(
+        "creating a file in {}: other exports to it kept removing it",
+        dir.display()
+    )))
+}
+
+/// Whether `path` still names the file `file` has open.
+fn still_named(path: &Path, file: &File) -> bool {
+    let Ok(named) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata()
+            .is_ok_and(|open| (open.dev(), open.ino()) == (named.dev(), named.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        named.is_file()
+    }
 }
 
 /// Remove temporary files earlier exports to `dir` left when they were

@@ -28,7 +28,7 @@ profile in `info` (`profiles: ["health-records/v1", "documents/v1"]`).
 <bin> auth login --org <ORG> [--label <WHO>]      # browser sign-in, PKCE, loopback redirect
 <bin> patients list                               # patient-list/v1
 <bin> records export --patient <ID> [--since <YYYY-MM-DD>] --ndjson    # records-stream/v1 on stdout
-<bin> records export --patient <ID> [--since <YYYY-MM-DD>] -o <DIR>    # the same stream to <DIR>/records.ndjson; records-export/v1 on stdout
+<bin> records export --patient <ID> [--since <YYYY-MM-DD>] -o <DIR>    # the same stream to <DIR>/records.ndjson (records.incomplete.ndjson if it ends incomplete); records-export/v1 on stdout, its path the file written
 <bin> documents list | download                   # documents/v1 (§1.7)
 <bin> api GET <PATH>                              # passthrough, GET only
 ```
@@ -229,7 +229,8 @@ killed, runs out of space or fails leaves the last complete one. An
 that leaves it, hidden as `.records.ndjson.<pid>.<nanos>.<n>.tmp`: each
 export holds a lock on its own file while it runs, and the next export to
 the directory removes every such file of the same owner that no live
-process holds. An ordinary file or a hard link already at either name is
+process holds. A filesystem without locks (some network mounts) gets no
+sweep, since a leftover there cannot be told from a live export. An ordinary file or a hard link already at either name is
 replaced by the rename and never written through. A symbolic link at
 `records.ndjson` is refused, never followed: exit 2 (`CliError::Usage`), and
 nothing is written. stdout gets one `records-export/v1` document (`path` being where `commit`
