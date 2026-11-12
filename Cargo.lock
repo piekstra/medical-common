@@ -1433,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "pk-med-fhir"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "pk-cli-core",
@@ -1447,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "pk-med-records"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "pk-cli-core",
  "pk-cli-http",
@@ -1460,7 +1460,7 @@ dependencies = [
 
 [[package]]
 name = "pk-med-smart"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "getrandom 0.4.3",
