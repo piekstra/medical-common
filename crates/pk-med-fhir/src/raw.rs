@@ -192,9 +192,14 @@ pub struct RawBundle {
 #[derive(Debug, Clone)]
 pub struct RawEntry {
     pub full_url: Option<String>,
-    /// `None` for an entry with no resource (a deleted one in a history).
+    /// `None` for an entry with no resource (a deleted one in a history),
+    /// and for one whose resource did not read ([`Self::unreadable`]).
     pub resource: Option<RawResource>,
     pub search: Option<BundleEntrySearch>,
+    /// Why the entry's resource did not read (not an object, no
+    /// `resourceType`), when it did not. Names no value of the resource.
+    /// The page's other entries are kept.
+    pub unreadable: Option<String>,
 }
 
 impl RawEntry {
@@ -231,6 +236,8 @@ struct EntryWire<'a> {
 
 impl RawBundle {
     /// Read a Bundle from JSON text. Anything else is [`CliError::Upstream`].
+    /// An entry whose resource does not read is kept with
+    /// [`RawEntry::unreadable`] set, so one bad entry costs only itself.
     pub fn parse(text: &str) -> Result<Self, CliError> {
         if !text.trim_start().starts_with('{') {
             return Err(CliError::Upstream(
@@ -260,16 +267,19 @@ impl RawBundle {
             .entry
             .into_iter()
             .map(|e| {
-                Ok(RawEntry {
+                let (resource, unreadable) = match e.resource.map(|r| RawResource::parse(r.get())) {
+                    None => (None, None),
+                    Some(Ok(resource)) => (Some(resource), None),
+                    Some(Err(why)) => (None, Some(why.to_string())),
+                };
+                RawEntry {
                     full_url: e.full_url,
-                    resource: e
-                        .resource
-                        .map(|r| RawResource::parse(r.get()))
-                        .transpose()?,
+                    resource,
                     search: e.search,
-                })
+                    unreadable,
+                }
             })
-            .collect::<Result<_, CliError>>()?;
+            .collect();
         Ok(RawBundle {
             bundle_type: wire.bundle_type,
             total: wire.total,
@@ -370,5 +380,43 @@ mod tests {
         assert_eq!(bundle.entry[1].mode(), Some("outcome"));
         assert!(bundle.entry[2].resource.is_none());
         assert!(RawBundle::parse(r#"{"resourceType":"Patient"}"#).is_err());
+    }
+
+    #[test]
+    fn a_bundle_keeps_the_entries_that_read() {
+        let b = RawBundle::parse(
+            r#"{"resourceType":"Bundle","entry":[
+                {"resource":{"resourceType":"Observation","id":"o1"}},
+                {"resource":{"id":"111111111","status":"final"}},
+                {"fullUrl":"urn:uuid:x"},
+                {"resource":"Observation"}
+            ]}"#,
+        )
+        .unwrap();
+        let kept: Vec<_> = b
+            .entry
+            .iter()
+            .map(|e| {
+                (
+                    e.resource.as_ref().map(|r| r.id.as_str()),
+                    e.unreadable.is_some(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            [
+                (Some("o1"), false),
+                (None, true),
+                (None, false),
+                (None, true)
+            ]
+        );
+        for why in b.entry.iter().filter_map(|e| e.unreadable.as_deref()) {
+            assert!(
+                !why.contains("111111111") && !why.contains("final"),
+                "{why}"
+            );
+        }
     }
 }

@@ -48,7 +48,7 @@ pub mod resources;
 #[cfg(feature = "test-util")]
 pub mod test_util;
 
-pub use client::{FhirClient, RetryPolicy, SearchResult, DEFAULT_PAGE_CAP};
+pub use client::{FhirClient, RetryPolicy, SearchResult, DEFAULT_PAGE_CAP, UNREACHABLE};
 pub use datatypes::*;
 pub use raw::{minify, RawBundle, RawEntry, RawResource};
 pub use resources::*;
