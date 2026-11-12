@@ -73,6 +73,11 @@ pub struct Header {
     /// `--since`, `YYYY-MM-DD`, when the pull was bounded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
+    /// With `since`: the resource types the pull left unbounded, because the
+    /// source documents no date parameter for them. Their resources may be
+    /// older than `since`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub since_unbounded: Vec<String>,
     /// When the pull started, RFC 3339.
     pub pulled_at: String,
     #[serde(default = "fhir_version")]
@@ -101,6 +106,7 @@ impl Header {
             organization,
             patient,
             since: None,
+            since_unbounded: Vec::new(),
             pulled_at: pulled_at.into(),
             fhir_version: fhir_version(),
             method: None,
@@ -707,6 +713,7 @@ mod tests {
         let header: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(header["fhir_version"], "4.0.1");
         assert!(header.get("method").is_none());
+        assert!(header.get("since_unbounded").is_none());
     }
 
     #[test]

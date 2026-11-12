@@ -9,7 +9,7 @@ First release. Pins cli-common v0.31.0.
   `Provenance` (`provenance/v1`) with `Provenance::from_stream`,
   `RecordsExport` (`records-export/v1`) and `create_export_file` (mode
   0600, no symbolic links). The `records-stream/v1` stream: `Header`
-  (with optional `method`), `Trailer` with counts, skips and
+  (with optional `method` and `since_unbounded`), `Trailer` with counts, skips and
   `complete`, `Skip` and its codes, `RecordsWriter` (dedupe by type and
   id, 64 MiB line limit, `complete: false` on a failure after the header)
   and `RecordsReader` (bounded lines; refuses a missing header or

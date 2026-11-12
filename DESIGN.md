@@ -37,11 +37,13 @@ profile in `info` (`profiles: ["health-records/v1", "documents/v1"]`).
 - `--patient` takes a `PatientContext.id`, or its `label`. With one
   context signed in, it may be omitted.
 - `--since` bounds each search by the date parameter the source documents
-  for the type (`date` on Observation, DiagnosticReport, DocumentReference,
-  Encounter, Immunization and Procedure at Epic), and leaves a type the
-  source documents none for unbounded rather than guess one (`_lastUpdated`
-  can turn a whole search into a 400). It never drops a resource the
-  source returns.
+  for the type, and leaves a type the source documents none for unbounded
+  rather than guess one (`_lastUpdated` can turn a whole search into a 400).
+  The stream header names those types in `since_unbounded`, so a reader
+  knows their resources may be older than `since`. It never drops a
+  resource the source returns. (At Epic, for example, `date` is documented
+  on Observation, DiagnosticReport, DocumentReference, Encounter,
+  Immunization and Procedure.)
 - An insurer CLI's export carries `Coverage` and `ExplanationOfBenefit`
   (CARIN Blue Button). A CLI whose source is not a FHIR server (a member
   site, downloaded files) maps what it reads into those FHIR shapes and sets
@@ -109,6 +111,7 @@ resource per line, and a trailer line. The writer is
 | `organization` | required | an `Organization` (§1.2) |
 | `patient` | required | a `PatientContext` (§1.3) |
 | `since` | optional | `--since`, `YYYY-MM-DD` |
+| `since_unbounded` | optional | with `since`: the types left unbounded because the source documents no date parameter for them |
 | `pulled_at` | required | when the pull started, RFC 3339 UTC |
 | `fhir_version` | defaulted | `4.0.1`; a reader takes an absent one as `4.0.1` |
 | `method` | optional | how the resources were obtained: absent means `fhir-api`; `portal` for resources mapped from a member or patient site or from files downloaded there |
