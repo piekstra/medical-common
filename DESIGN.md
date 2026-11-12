@@ -111,7 +111,7 @@ resource per line, and a trailer line. The writer is
 | `organization` | required | an `Organization` (§1.2) |
 | `patient` | required | a `PatientContext` (§1.3) |
 | `since` | optional | `--since`, `YYYY-MM-DD` |
-| `since_unbounded` | optional | with `since`: the types left unbounded because the source documents no date parameter for them |
+| `since_unbounded` | optional | with `since`: an array of FHIR `resourceType` names (`["Patient", "Medication"]`), the types the pull left unbounded because the source documents no date parameter for them; omitted when empty and when `since` is absent |
 | `pulled_at` | required | when the pull started, RFC 3339 UTC |
 | `fhir_version` | defaulted | `4.0.1`; a reader takes an absent one as `4.0.1` |
 | `method` | optional | how the resources were obtained: absent means `fhir-api`; `portal` for resources mapped from a member or patient site or from files downloaded there |
@@ -212,10 +212,10 @@ name, and the line and column.
 The same stream, to `<DIR>/records.ndjson`, by
 `pk_med_records::create_export_file`: the directory is created with mode
 0700 when missing, and the file is created new with mode 0600 under a
-temporary name (`O_EXCL`, which follows no link) and renamed into place. A
-file already at `records.ndjson`, a symbolic or a hard link included, is
-replaced and never written through; a symbolic link is refused with a
-message. stdout gets one `records-export/v1` document: `{schema, path,
+temporary name (`O_EXCL`, which follows no link) and renamed into place. An
+ordinary file or a hard link already at `records.ndjson` is replaced by the
+rename and never written through. A symbolic link there is refused, never
+followed: exit 2 (`CliError::Usage`), and nothing is written. stdout gets one `records-export/v1` document: `{schema, path,
 bytes, complete, counts, skipped?}`, `bytes` being the whole file, trailer
 included (`RecordsExport::new(path, &finished)`, from what
 `RecordsWriter::finish` returned). Development and tests use it with
@@ -284,6 +284,10 @@ reader ignores members it does not know, in the header, the trailer and
 every DTO. The Rust structs have public fields; build them with their
 constructors (`Header::new`, `Skip::resource`, `Skip::search`) so a field
 added within `/v1` does not break a caller.
+
+The header's `method` and `since_unbounded` are such fields: optional,
+omitted when absent or empty, and ignored by a reader that predates them,
+so `records-stream/v1` holds with or without them.
 
 ## 2. FHIR types and client (crate `pk-med-fhir`)
 
