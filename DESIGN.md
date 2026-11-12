@@ -373,7 +373,18 @@ code runs over `pk_cli_http::BlockingTransport` (driven with
 - A 429, a 5xx, an edge's HTML 403, or a connection that failed is asked
   again under `RetryPolicy` (3 requests, 1 s then 2 s apart, or the
   server's `Retry-After`, 30 s at most; a server asking for longer is not
-  waited for). `on_retry` is told of each wait in one line (`the FHIR
+  waited for). `RetryPolicy` is `#[non_exhaustive]`: build it from
+  `default()` or `none()` with its methods. A vendor's own retry guidance
+  is the CLI's to set:
+
+  | Method | Default | Set |
+  |---|---|---|
+  | `attempts(n)`, `delay(d)`, `max_wait(d)` | 3, 1 s, 30 s | requests in all, the first wait (doubled after), the longest wait |
+  | `server_errors(&[502, 503, 504])` | every 5xx | only these 5xx are asked again; values outside 500–599 are ignored |
+  | `retry_after_required(true)` | `false` | a 429 is asked again only with a `Retry-After` within `max_wait`, since one that does not say when may be a daily quota |
+  | `jitter(0.25)` | `0` | each wait, a `Retry-After` included, lengthened by a random 0–25 %, never past `max_wait` |
+
+  `on_retry` is told of each wait in one line (`the FHIR
   server at https://… answered HTTP 429 for Observation; asking again in
   5 s (2 of 3)`), so a CLI can say why it is quiet. The line names the
   origin, the resource type and the wait, never a query, an id or a token.

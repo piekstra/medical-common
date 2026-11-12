@@ -2,7 +2,9 @@
 
 use std::time::Duration;
 
-use pk_cli_core::transport::{require_secure_url, HttpRequest, HttpResponse, Transport};
+use pk_cli_core::transport::{
+    require_secure_url, HttpRequest, HttpResponse, Inconclusive, Transport,
+};
 use pk_cli_core::{CliError, Reason};
 use pk_cli_secrets::Secret;
 
@@ -36,8 +38,12 @@ enum Bearer {
 }
 
 /// Whether and how long to wait and ask again after an answer that says
-/// nothing (a 429, a 5xx, an edge's HTML 403).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// nothing (a 429, a 5xx, an edge's HTML 403) or a connection that failed.
+/// Build one from [`RetryPolicy::default`] or [`RetryPolicy::none`] with its
+/// methods; the defaults are the protocol's, and a vendor's own guidance
+/// (which statuses, whether a 429 must say when, jitter) is the CLI's to set.
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RetryPolicy {
     /// Requests in all, the first included: `1` never asks again.
     pub attempts: u32,
@@ -47,7 +53,16 @@ pub struct RetryPolicy {
     /// The longest wait. A server asking for longer is not waited for: its
     /// answer is the error.
     pub max_wait: Duration,
+    /// The 5xx statuses asked again, bit `n` for status `500 + n`.
+    server_errors: u128,
+    /// A 429 is asked again only when it says when (`Retry-After`).
+    retry_after_required: bool,
+    /// Each wait lengthened by up to this many thousandths of itself.
+    jitter_permille: u16,
 }
+
+/// Every status from 500 to 599.
+const EVERY_SERVER_ERROR: u128 = (1 << 100) - 1;
 
 impl RetryPolicy {
     /// One request, no retry.
@@ -56,19 +71,129 @@ impl RetryPolicy {
             attempts: 1,
             delay: Duration::ZERO,
             max_wait: Duration::ZERO,
+            server_errors: EVERY_SERVER_ERROR,
+            retry_after_required: false,
+            jitter_permille: 0,
         }
+    }
+
+    /// Requests in all, the first included (at least 1).
+    pub fn attempts(mut self, attempts: u32) -> Self {
+        self.attempts = attempts.max(1);
+        self
+    }
+
+    /// The wait before the second request when the server names none,
+    /// doubled before each later one.
+    pub fn delay(mut self, delay: Duration) -> Self {
+        self.delay = delay;
+        self
+    }
+
+    /// The longest wait; a server asking for longer is not waited for.
+    pub fn max_wait(mut self, max_wait: Duration) -> Self {
+        self.max_wait = max_wait;
+        self
+    }
+
+    /// Ask again after only these 5xx statuses (`&[502, 503, 504]`); every
+    /// 5xx unless set. A value outside 500–599 is ignored: a 429, an edge's
+    /// HTML 403 and a failed connection have their own rules.
+    pub fn server_errors(mut self, statuses: &[u16]) -> Self {
+        self.server_errors = statuses
+            .iter()
+            .filter(|s| (500..600).contains(*s))
+            .fold(0, |bits, s| bits | 1 << (s - 500));
+        self
+    }
+
+    /// Ask again after a 429 only when it carries a `Retry-After` within
+    /// [`max_wait`](Self::max_wait). A 429 that does not say when may be a
+    /// quota for the day, which waiting does not lift. Off unless set: a 429
+    /// without one is asked again after the usual delay.
+    pub fn retry_after_required(mut self, required: bool) -> Self {
+        self.retry_after_required = required;
+        self
+    }
+
+    /// Lengthen each wait by a random fraction of itself, up to `fraction`
+    /// (`0.25`: up to a quarter), so clients that failed together do not
+    /// ask again together. It applies to a `Retry-After` too, which is a
+    /// shortest wait, and never takes a wait past
+    /// [`max_wait`](Self::max_wait). `0` unless set; clamped to 0–1.
+    pub fn jitter(mut self, fraction: f64) -> Self {
+        let fraction = if fraction.is_nan() {
+            0.0
+        } else {
+            fraction.clamp(0.0, 1.0)
+        };
+        self.jitter_permille = (fraction * 1000.0).round() as u16;
+        self
+    }
+
+    /// Whether an answer that says nothing is asked again at all, before
+    /// the attempts and the wait are counted.
+    fn covers(&self, answer: &Inconclusive) -> bool {
+        match answer.status {
+            429 => answer.retry_after.is_some() || !self.retry_after_required,
+            500..=599 => self.server_errors & (1 << (answer.status - 500)) != 0,
+            _ => true,
+        }
+    }
+
+    /// `wait`, lengthened by the jitter, and never past `max_wait` unless
+    /// `wait` already is.
+    fn jittered(&self, wait: Duration) -> Duration {
+        if self.jitter_permille == 0 || wait.is_zero() {
+            return wait;
+        }
+        let fraction = random_unit() * f64::from(self.jitter_permille) / 1000.0;
+        (wait + wait.mul_f64(fraction)).min(self.max_wait.max(wait))
     }
 }
 
-/// Three requests at most, 1 s then 2 s apart, waiting 30 s at most.
+/// Three requests at most, 1 s then 2 s apart, waiting 30 s at most, after
+/// any 429 or 5xx, with no jitter.
 impl Default for RetryPolicy {
     fn default() -> Self {
         RetryPolicy {
             attempts: 3,
             delay: Duration::from_secs(1),
             max_wait: Duration::from_secs(30),
+            ..RetryPolicy::none()
         }
     }
+}
+
+impl std::fmt::Debug for RetryPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let server_errors: Vec<u16> = (0..100u16)
+            .filter(|n| self.server_errors & (1 << n) != 0)
+            .map(|n| 500 + n)
+            .collect();
+        let mut d = f.debug_struct("RetryPolicy");
+        d.field("attempts", &self.attempts)
+            .field("delay", &self.delay)
+            .field("max_wait", &self.max_wait);
+        if self.server_errors == EVERY_SERVER_ERROR {
+            d.field("server_errors", &"500-599");
+        } else {
+            d.field("server_errors", &server_errors);
+        }
+        d.field("retry_after_required", &self.retry_after_required)
+            .field("jitter", &(f64::from(self.jitter_permille) / 1000.0))
+            .finish()
+    }
+}
+
+/// A number in [0, 1), from the standard library's randomly keyed hasher:
+/// enough to spread retries, not for anything secret.
+fn random_unit() -> f64 {
+    use std::hash::{BuildHasher, RandomState};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static DRAWS: AtomicU64 = AtomicU64::new(0);
+    let bits = RandomState::new().hash_one(DRAWS.fetch_add(1, Ordering::Relaxed));
+    (bits >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// A search's resources across its pages.
@@ -443,7 +568,7 @@ impl<T: Transport> FhirClient<T> {
                 // a refusal before sending (exit 2: an insecure URL) is not.
                 Err(e) if e.exit_code() == 5 => {
                     if attempt < self.retry.attempts {
-                        let wait = self.backoff(attempt);
+                        let wait = self.retry.jittered(self.backoff(attempt));
                         self.report_retry(
                             &format!(
                                 "could not reach the FHIR server at {} for {what}",
@@ -479,11 +604,15 @@ impl<T: Transport> FhirClient<T> {
             }
             let now = (self.clock)();
             if attempt < self.retry.attempts {
-                if let Some(inconclusive) = response.inconclusive(now) {
+                if let Some(inconclusive) = response
+                    .inconclusive(now)
+                    .filter(|answer| self.retry.covers(answer))
+                {
                     let wait = inconclusive
                         .retry_after
                         .unwrap_or_else(|| self.backoff(attempt));
                     if wait <= self.retry.max_wait {
+                        let wait = self.retry.jittered(wait);
                         self.report_retry(
                             &format!(
                                 "the FHIR server at {} answered HTTP {} for {what}",
@@ -897,6 +1026,103 @@ mod tests {
             }
             Ok(json(r#"{"resourceType":"Patient","id":"p1"}"#))
         }
+    }
+
+    #[test]
+    fn only_the_chosen_server_errors_are_asked_again() {
+        let policy = RetryPolicy::default().server_errors(&[502, 503, 504, 429, 99]);
+        let c = client(vec![
+            HttpResponse::new(500, ""),
+            json(r#"{"resourceType":"Patient"}"#),
+        ])
+        .retry(policy);
+        assert_eq!(
+            block_on(c.read("Patient", "p1")).unwrap_err().exit_code(),
+            5
+        );
+        assert_eq!(
+            c.transport().seen.borrow().len(),
+            1,
+            "a 500 is not asked again"
+        );
+
+        let c = client(vec![
+            HttpResponse::new(503, ""),
+            HttpResponse::new(429, ""),
+            json(r#"{"resourceType":"Patient"}"#),
+        ])
+        .retry(policy);
+        assert!(block_on(c.read("Patient", "p1")).is_ok());
+        assert_eq!(c.transport().seen.borrow().len(), 3, "a 503, then a 429");
+        let shown = format!("{policy:?}");
+        assert!(shown.contains("[502, 503, 504]"), "{shown}");
+        assert!(format!("{:?}", RetryPolicy::default()).contains("500-599"));
+    }
+
+    #[test]
+    fn a_429_that_does_not_say_when_is_not_asked_again_when_one_is_required() {
+        let policy = RetryPolicy::default().retry_after_required(true);
+        let c = client(vec![
+            HttpResponse::new(429, ""),
+            json(r#"{"resourceType":"Patient"}"#),
+        ])
+        .retry(policy);
+        assert_eq!(
+            block_on(c.read("Patient", "p1")).unwrap_err().exit_code(),
+            5
+        );
+        assert_eq!(c.transport().seen.borrow().len(), 1);
+
+        let c = client(vec![
+            HttpResponse::new(429, "").header("retry-after", "2"),
+            HttpResponse::new(503, ""),
+            json(r#"{"resourceType":"Patient"}"#),
+        ])
+        .retry(policy);
+        assert!(block_on(c.read("Patient", "p1")).is_ok());
+        assert_eq!(c.transport().seen.borrow().len(), 3, "a 5xx keeps its rule");
+    }
+
+    static JITTERED: Mutex<Vec<Duration>> = Mutex::new(Vec::new());
+
+    #[test]
+    fn jitter_lengthens_each_wait_by_at_most_its_fraction_and_never_past_max_wait() {
+        let policy = RetryPolicy::default()
+            .attempts(4)
+            .delay(Duration::from_secs(1))
+            .max_wait(Duration::from_secs(30))
+            .jitter(0.25);
+        let c = client(vec![
+            HttpResponse::new(503, ""),
+            HttpResponse::new(502, ""),
+            HttpResponse::new(429, "").header("retry-after", "30"),
+            json(r#"{"resourceType":"Patient"}"#),
+        ])
+        .retry(policy)
+        .sleeper(|wait| JITTERED.lock().unwrap().push(wait));
+        assert!(block_on(c.read("Patient", "p1")).is_ok());
+        let waits = JITTERED.lock().unwrap().clone();
+        let secs = |s: f64| Duration::from_secs_f64(s);
+        assert_eq!(waits.len(), 3, "{waits:?}");
+        assert!(waits[0] >= secs(1.0) && waits[0] <= secs(1.25), "{waits:?}");
+        assert!(waits[1] >= secs(2.0) && waits[1] <= secs(2.5), "{waits:?}");
+        assert_eq!(
+            waits[2],
+            secs(30.0),
+            "a Retry-After at max_wait stays there"
+        );
+
+        let draws: Vec<f64> = (0..64).map(|_| random_unit()).collect();
+        assert!(draws.iter().all(|d| (0.0..1.0).contains(d)), "{draws:?}");
+        assert!(draws.windows(2).any(|w| w[0] != w[1]), "{draws:?}");
+        assert_eq!(
+            RetryPolicy::default().jitter(f64::NAN),
+            RetryPolicy::default()
+        );
+        assert_eq!(
+            RetryPolicy::default().jitter(7.0),
+            RetryPolicy::default().jitter(1.0)
+        );
     }
 
     #[test]
