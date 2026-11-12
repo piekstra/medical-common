@@ -539,10 +539,14 @@ never a value, and a keychain error shows the account as
 - A grant refused with `Reason::CredentialRefused` (the token endpoint's
   `invalid_grant` or `invalid_client`, or nothing left to renew with)
   stamps `refused_at` on the stored session, under the lock, and keeps the
-  rest. The next use still tries one grant, and a grant the server accepts
-  clears it. A status command shows a session with `refused_at` as
-  refused, and a refusal the server takes back (one right after a
-  registration, say) costs no new sign-in.
+  rest. `fresh` treats a session with `refused_at` as lapsed, whatever its
+  clock says: the refused token is not handed out again, the next use
+  tries one grant, and a grant the server accepts clears it. With nothing
+  to renew with, that use is refused (exit 3) before anything is sent. A
+  status command shows a session with `refused_at` as refused, and a
+  refusal the server takes back (one right after a registration, say)
+  costs no new sign-in. The stamp is best effort: a keychain that refuses
+  the write leaves it unset, and the refusal is still the error returned.
 
 | Condition | Exit | `Reason` |
 |---|---|---|

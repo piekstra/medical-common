@@ -59,8 +59,11 @@ impl<'a, T: Transport> Renewer<'a, T> {
     }
 
     /// The stored session for `account`, renewed first when its access token
-    /// has lapsed at `now` (Unix seconds). [`CliError::Auth`] with
-    /// `Reason::NoCredential` when nothing is stored.
+    /// has lapsed at `now` (Unix seconds) or the server refused it
+    /// (`refused_at`): a refused token is never handed out again, and a
+    /// refused sign-in with nothing to renew with is refused before anything
+    /// is sent. [`CliError::Auth`] with `Reason::NoCredential` when nothing
+    /// is stored.
     ///
     /// Synchronous, because the refresh lock is: the grant inside it runs on
     /// `pk_cli_core::block_on`, so the transport must be one it can drive (the
@@ -68,14 +71,18 @@ impl<'a, T: Transport> Renewer<'a, T> {
     /// `block_on`, not from inside a future.
     pub fn fresh(&self, account: &str, now: u64) -> Result<SmartSession, CliError> {
         let session = self.load(account)?;
-        if !session.tokens.is_expired(now, self.skew_secs) {
+        if !self.due(&session, now) {
             return Ok(session);
         }
         self.lock.renew(
             || self.load(account),
-            |latest| latest.tokens.is_expired(now, self.skew_secs),
+            |latest| self.due(latest, now),
             |latest| self.grant_and_store(latest, now),
         )
+    }
+
+    fn due(&self, session: &SmartSession, now: u64) -> bool {
+        session.refused_at.is_some() || session.tokens.is_expired(now, self.skew_secs)
     }
 
     /// Renew now, due or not, unless another process renewed since this
@@ -126,8 +133,8 @@ impl<'a, T: Transport> Renewer<'a, T> {
                 Ok(renewed)
             }
             Err(refused) if refused.reason() == Some(Reason::CredentialRefused) => {
-                // The refusal is the answer the caller needs; a failure to
-                // record it is not reported over it.
+                // Best effort: the refusal is the answer the caller needs,
+                // and a failure to record it is not reported over it.
                 let _ = self.store.save(&SmartSession {
                     refused_at: Some(now),
                     ..latest
