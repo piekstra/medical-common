@@ -1,9 +1,9 @@
 //! A sign-in as the keychain keeps it: one JSON item per (organization,
 //! patient), account `smart/<organization>/<patient>`.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::{Mutex, MutexGuard};
 
 use pk_cli_auth::oauth::{TokenResponse, TokenSet};
 use pk_cli_core::CliError;
@@ -295,37 +295,54 @@ impl SessionStore for CredentialStore {
     }
 }
 
-/// Sessions in memory, for tests: nothing touches the keychain.
+/// Sessions in memory, for tests: nothing touches the keychain. It is
+/// `Send + Sync`, as [`CredentialStore`] is, so it can stand in for the
+/// keychain behind a `FhirClient::bearer_with` source. Each item is kept as
+/// a [`Secret`], zeroized when replaced or dropped.
 #[derive(Default)]
 pub struct MemoryStore {
-    items: RefCell<HashMap<String, String>>,
+    items: Mutex<HashMap<String, Secret>>,
+}
+
+impl MemoryStore {
+    /// The items, whether or not another thread panicked holding them: a
+    /// map of strings has no half-done state to fear.
+    fn items(&self) -> MutexGuard<'_, HashMap<String, Secret>> {
+        self.items
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 impl SessionStore for MemoryStore {
     fn load(&self, account: &str) -> Result<Option<SmartSession>, CliError> {
-        self.items
-            .borrow()
+        self.items()
             .get(account)
-            .map(|text| decode_session(text))
+            .map(|text| decode_session(text.expose()))
             .transpose()
     }
 
     fn save(&self, session: &SmartSession) -> Result<(), CliError> {
         let text = encode_session(session)?;
-        self.items
-            .borrow_mut()
-            .insert(session.account(), text.expose().to_string());
+        self.items().insert(session.account(), text);
         Ok(())
     }
 
     fn delete(&self, account: &str) -> Result<bool, CliError> {
-        Ok(self.items.borrow_mut().remove(account).is_some())
+        Ok(self.items().remove(account).is_some())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn both_stores_can_back_a_shared_bearer_source() {
+        fn shareable<T: SessionStore + Send + Sync>() {}
+        shareable::<MemoryStore>();
+        shareable::<CredentialStore>();
+    }
 
     #[test]
     fn two_pairs_never_share_an_account() {
@@ -356,13 +373,8 @@ mod tests {
         let mut session = decode_session(&stored(1)).unwrap();
         session.format = 0;
         store.save(&session).unwrap();
-        let text = store
-            .items
-            .borrow()
-            .get(&session.account())
-            .unwrap()
-            .clone();
-        let value: Value = serde_json::from_str(&text).unwrap();
+        let value: Value =
+            serde_json::from_str(store.items()[&session.account()].expose()).unwrap();
         assert_eq!(value["format"], SESSION_FORMAT);
     }
 
