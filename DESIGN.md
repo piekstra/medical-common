@@ -505,6 +505,7 @@ never a value, and a keychain error shows the account as
 | `scope` | the scope asked for; the scope granted is `tokens.scope` |
 | `tokens` | cli-common's `TokenSet`: access and refresh tokens, `expires_at`, the ID token, the answer's other members |
 | `dynamic_client` | a client registered for this sign-in (§3.4) |
+| `refused_at` | when the server last refused a grant for this sign-in (Unix seconds); cleared by the next grant it accepts (§3.3) |
 | `extra` | a vendor's own state |
 
 `Debug` on a session, its token set or its client shows no token or key.
@@ -535,6 +536,17 @@ never a value, and a keychain error shows the account as
   feature `rsa`), so a sign-in another process stored meanwhile is signed
   with its own key. A signer whose `alg` or `kid` differs from the stored
   client's is refused before anything is sent.
+- A grant refused with `Reason::CredentialRefused` (the token endpoint's
+  `invalid_grant` or `invalid_client`, or nothing left to renew with)
+  stamps `refused_at` on the stored session, under the lock, and keeps the
+  rest. `fresh` treats a session with `refused_at` as lapsed, whatever its
+  clock says: the refused token is not handed out again, the next use
+  tries one grant, and a grant the server accepts clears it. With nothing
+  to renew with, that use is refused (exit 3) before anything is sent. A
+  status command shows a session with `refused_at` as refused, and a
+  refusal the server takes back (one right after a registration, say)
+  costs no new sign-in. The stamp is best effort: a keychain that refuses
+  the write leaves it unset, and the refusal is still the error returned.
 
 | Condition | Exit | `Reason` |
 |---|---|---|

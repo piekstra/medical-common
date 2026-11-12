@@ -306,6 +306,86 @@ fn a_lapsed_session_is_renewed_once_with_its_scope() {
 }
 
 #[test]
+fn a_refused_grant_is_recorded_and_the_next_use_tries_again() {
+    let mock = MockServer::start();
+    let client = ClientAuth::public(CLIENT_ID);
+    let mut session = sign_in(&mock, &client, &NoQuirks);
+    session.tokens.expires_at = Some(NOW - 1);
+    let store = MemoryStore::default();
+    store.save(&session).unwrap();
+    let (lock, oauth) = (lock(), oauth());
+    let renewer = Renewer::new(&store, &lock, &oauth, &client, &NoQuirks);
+
+    mock.fail(Fault::new(
+        "POST",
+        "/token",
+        400,
+        r#"{"error":"invalid_grant"}"#,
+    ));
+    let err = renewer.fresh(&session.account(), NOW).unwrap_err();
+    assert_eq!(
+        (err.exit_code(), err.reason()),
+        (3, Some(Reason::CredentialRefused))
+    );
+    let stored = store.load(&session.account()).unwrap().unwrap();
+    assert_eq!(stored.refused_at, Some(NOW));
+    assert_eq!(
+        stored.tokens.refresh_token, session.tokens.refresh_token,
+        "the sign-in is kept"
+    );
+
+    let renewed = renewer.fresh(&session.account(), NOW + 1).unwrap();
+    assert_eq!(renewed.refused_at, None);
+    let stored = store.load(&session.account()).unwrap().unwrap();
+    assert_eq!(stored.refused_at, None);
+    assert_eq!(stored.tokens.access_token, renewed.tokens.access_token);
+}
+
+#[test]
+fn a_refused_token_is_not_handed_out_again() {
+    let mock = MockServer::start();
+    let client = ClientAuth::public(CLIENT_ID);
+    let session = sign_in(&mock, &client, &NoQuirks);
+    let store = MemoryStore::default();
+    store.save(&session).unwrap();
+    let (lock, oauth) = (lock(), oauth());
+    let renewer = Renewer::new(&store, &lock, &oauth, &client, &NoQuirks);
+    let account = session.account();
+
+    // A 401 on a token the clock still calls fresh, then a refused grant.
+    mock.fail(Fault::new(
+        "POST",
+        "/token",
+        400,
+        r#"{"error":"invalid_grant"}"#,
+    ));
+    let err = renewer
+        .after_refusal(&account, &session.tokens.access_token, NOW)
+        .unwrap_err();
+    assert_eq!(err.reason(), Some(Reason::CredentialRefused));
+
+    // The next use grants once rather than hand the refused token out.
+    let before = token_requests(&mock);
+    let next = renewer.fresh(&account, NOW).unwrap();
+    assert_eq!(token_requests(&mock), before + 1);
+    assert_ne!(next.tokens.access_token, session.tokens.access_token);
+    assert_eq!(next.refused_at, None);
+
+    // Refused, with nothing to renew with: refused before anything is sent.
+    let mut dead = next.clone();
+    dead.tokens.refresh_token = None;
+    dead.refused_at = Some(NOW);
+    store.save(&dead).unwrap();
+    let sent = mock.requests().len();
+    let err = renewer.fresh(&account, NOW).unwrap_err();
+    assert_eq!(
+        (err.exit_code(), err.reason()),
+        (3, Some(Reason::CredentialRefused))
+    );
+    assert_eq!(mock.requests().len(), sent, "nothing is sent");
+}
+
+#[test]
 fn nothing_stored_or_nothing_to_renew_with_is_exit_3() {
     let mock = MockServer::start();
     let client = ClientAuth::public(CLIENT_ID);

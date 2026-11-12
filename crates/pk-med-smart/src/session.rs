@@ -69,6 +69,16 @@ pub struct SmartSession {
     /// A client registered for this sign-in (Epic's dynamic registration).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dynamic_client: Option<DynamicClient>,
+    /// When the server last refused a grant for this sign-in (Unix
+    /// seconds); the next grant it accepts clears it. While it is set a
+    /// status command can show the sign-in as refused, and
+    /// [`crate::Renewer::fresh`] hands out no token without a grant first:
+    /// the next use tries one, so a refusal the server takes back (one
+    /// right after registration, say) costs no new sign-in. Recorded on a
+    /// best-effort basis: a keychain that refuses the write leaves it
+    /// unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refused_at: Option<u64>,
     /// A vendor's own state (a practice chosen at sign-in).
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub extra: Map<String, Value>,
