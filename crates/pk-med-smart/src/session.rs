@@ -224,8 +224,8 @@ pub trait SessionStore {
 pub fn decode_session(text: &str) -> Result<SmartSession, CliError> {
     let session: SmartSession = serde_json::from_str(text).map_err(|e| {
         CliError::Keychain(format!(
-            "a stored SMART session does not read (line {}, column {}); clear it with `auth \
-             logout --forget` and sign in again",
+            "a stored SMART session does not read (line {}, column {}); clear the stored \
+             sign-in and sign in again",
             e.line(),
             e.column()
         ))
@@ -240,10 +240,14 @@ pub fn decode_session(text: &str) -> Result<SmartSession, CliError> {
     Ok(session)
 }
 
+/// The session as stored, stamped with this release's [`SESSION_FORMAT`]
+/// whatever format it was read with: what is written is this release's
+/// shape, and the stamp must say so.
 fn encode_session(session: &SmartSession) -> Result<Secret, CliError> {
-    serde_json::to_string(session)
-        .map(Secret::new)
-        .map_err(|_| CliError::Other("a SMART session did not serialize".into()))
+    let mut value = serde_json::to_value(session)
+        .map_err(|_| CliError::Other("a SMART session did not serialize".into()))?;
+    value["format"] = Value::from(SESSION_FORMAT);
+    Ok(Secret::new(value.to_string()))
 }
 
 /// The keychain's error with the account, which holds the patient's id, put
@@ -334,6 +338,22 @@ mod tests {
         assert_eq!(decode_session(&unversioned).unwrap().format, 1);
         let err = decode_session(&stored(2)).unwrap_err();
         assert!(err.to_string().contains("newer release"), "{err}");
+    }
+
+    #[test]
+    fn every_write_stamps_this_releases_format() {
+        let store = MemoryStore::default();
+        let mut session = decode_session(&stored(1)).unwrap();
+        session.format = 0;
+        store.save(&session).unwrap();
+        let text = store
+            .items
+            .borrow()
+            .get(&session.account())
+            .unwrap()
+            .clone();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["format"], SESSION_FORMAT);
     }
 
     #[test]

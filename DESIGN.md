@@ -475,7 +475,7 @@ never a value, and a keychain error shows the account as
 
 | Field | |
 |---|---|
-| `format` | the item's shape, `SESSION_FORMAT` (1). A release refuses an item with a newer format ("written by a newer release of this CLI; update it") rather than read it in its own shape and write it back. An item without one is format 1 |
+| `format` | the item's shape, `SESSION_FORMAT` (1). Every write stamps the writer's own format, whatever format the item was read with. A release refuses an item with a newer format ("written by a newer release of this CLI; update it") rather than read it in its own shape and write it back. An item without one is format 1 |
 | `organization`, `patient`, `fhir_user` | who the sign-in is for |
 | `fhir_base`, `issuer`, `token_endpoint` | where it was made; renewal reads these, not a fresh discovery |
 | `client_id` | the client the tokens were issued to |
