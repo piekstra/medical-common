@@ -358,11 +358,18 @@ code runs over `pk_cli_http::BlockingTransport` (driven with
   server at https://… answered HTTP 429 for Observation; asking again in
   5 s (2 of 3)`), so a CLI can say why it is quiet. The line names the
   origin, the resource type and the wait, never a query, an id or a token.
-- A request that got no HTTP answer at all after its retries (the network
-  is down, the host does not resolve, the connection was reset) is exit 5
-  with reason `pk_med_fhir::UNREACHABLE` (`Reason::Provider("unreachable")`).
-  A server that answered with an error has no such reason. A CLI that skips
-  a resource type on a server's error can end the whole run on this one.
+- A request that got no complete HTTP answer after its retries is exit 5
+  with reason `pk_med_fhir::UNREACHABLE` (`Reason::Provider("unreachable")`):
+  the connection failed, timed out, or broke before the whole answer was
+  read. A server that answered with an error status has no such reason,
+  and a reason the transport set is kept. cli-common v0.31.0's transport
+  does not say which of those it was, so `UNREACHABLE` is not proof the
+  network is gone: one slow page that timed out three times reads the
+  same. A CLI that ends a run on it, rather than skip one type, can first
+  ask the server something cheap (`get_raw("metadata")`) to tell the two
+  apart.
+- The bearer source and the retry observer are `Send + Sync`, so a client
+  is `Send + Sync` whenever its transport is.
 - A `next` link equal to the page just read ends the search with
   `truncated: true`, as the page cap does.
 

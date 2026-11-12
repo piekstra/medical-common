@@ -14,17 +14,20 @@ use crate::{normalize_base, Resource, FHIR_JSON};
 /// How many search pages [`FhirClient::search`] follows unless told otherwise.
 pub const DEFAULT_PAGE_CAP: u32 = 100;
 
-/// The reason on an error for a request that got no HTTP answer at all (the
-/// network is down, the host does not resolve), after its retries: a caller
-/// that skips a resource on a server's error can stop a whole export on this.
+/// The reason on an error for a request that got no complete HTTP answer
+/// after its retries: the connection failed, timed out, or broke before the
+/// whole answer was read. A server that answered with an error status has
+/// no such reason. The transport does not say which of those it was, so
+/// this is not proof the network is gone: one slow page that timed out
+/// three times reads the same. A reason the transport set is kept.
 pub const UNREACHABLE: Reason = Reason::Provider("unreachable");
 
 /// A bearer that can change during a run: called before each request with
 /// `None`, and once more after a 401 with the token that was refused.
-type TokenSource = Box<dyn Fn(Option<&Secret>) -> Result<Secret, CliError>>;
+type TokenSource = Box<dyn Fn(Option<&Secret>) -> Result<Secret, CliError> + Send + Sync>;
 
 /// Told of each wait before a retry ([`FhirClient::on_retry`]).
-type RetryReport = Box<dyn Fn(&str)>;
+type RetryReport = Box<dyn Fn(&str) + Send + Sync>;
 
 enum Bearer {
     None,
@@ -166,7 +169,7 @@ impl<T: Transport> FhirClient<T> {
     /// is the request's error.
     pub fn bearer_with(
         mut self,
-        source: impl Fn(Option<&Secret>) -> Result<Secret, CliError> + 'static,
+        source: impl Fn(Option<&Secret>) -> Result<Secret, CliError> + Send + Sync + 'static,
     ) -> Self {
         self.bearer = Bearer::Source(Box::new(source));
         self
@@ -176,7 +179,7 @@ impl<T: Transport> FhirClient<T> {
     /// (`the FHIR server at https://… answered HTTP 429 for Observation;
     /// asking again in 5 s (2 of 3)`), so a long wait is not silent. The
     /// line names no query, id or token.
-    pub fn on_retry(mut self, report: impl Fn(&str) + 'static) -> Self {
+    pub fn on_retry(mut self, report: impl Fn(&str) + Send + Sync + 'static) -> Self {
         self.on_retry = Some(Box::new(report));
         self
     }
@@ -453,7 +456,11 @@ impl<T: Transport> FhirClient<T> {
                         attempt += 1;
                         continue;
                     }
-                    return Err(e.because(UNREACHABLE));
+                    return Err(if e.reason().is_some() {
+                        e
+                    } else {
+                        e.because(UNREACHABLE)
+                    });
                 }
                 Err(e) => return Err(e),
             };
@@ -603,9 +610,10 @@ fn now_unix() -> i64 {
 mod tests {
     use super::*;
     use pk_cli_core::{block_on, Reason};
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
     use std::collections::VecDeque;
-    use std::rc::Rc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     /// Answers from a queue, keeping each request.
     #[derive(Default)]
@@ -932,22 +940,23 @@ mod tests {
         );
     }
 
-    type Calls = Rc<RefCell<Vec<Option<String>>>>;
+    type Calls = Arc<Mutex<Vec<Option<String>>>>;
 
     fn sourced(answers: Vec<HttpResponse>, renew_to: &'static str) -> (FhirClient<Canned>, Calls) {
-        let calls: Calls = Rc::default();
+        let calls: Calls = Arc::default();
         let log = calls.clone();
-        let renewed = Rc::new(Cell::new(false));
+        let renewed = Arc::new(AtomicBool::new(false));
         let c = FhirClient::new(Canned::with(answers), BASE, "pk-test", "0")
             .unwrap()
             .sleeper(|_| {})
             .bearer_with(move |refused| {
-                log.borrow_mut()
+                log.lock()
+                    .unwrap()
                     .push(refused.map(|t| t.expose().to_string()));
                 if refused.is_some() {
-                    renewed.set(true);
+                    renewed.store(true, Ordering::SeqCst);
                 }
-                Ok(Secret::new(if renewed.get() {
+                Ok(Secret::new(if renewed.load(Ordering::SeqCst) {
                     renew_to
                 } else {
                     "token-a"
@@ -976,13 +985,76 @@ mod tests {
         block_on(c.read("Patient", "p1")).unwrap();
         block_on(c.read("Patient", "p1")).unwrap();
         assert_eq!(
-            *calls.borrow(),
+            *calls.lock().unwrap(),
             vec![None, Some("token-a".to_string()), None]
         );
         assert_eq!(
             bearers(&c),
             ["Bearer token-a", "Bearer token-b", "Bearer token-b"]
         );
+    }
+
+    #[test]
+    fn the_source_is_asked_again_for_each_retry_and_a_renewed_token_survives_one() {
+        let (c, calls) = sourced(vec![HttpResponse::new(429, ""), json(PATIENT)], "token-b");
+        block_on(c.read("Patient", "p1")).unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec![None, None]);
+
+        let (c, calls) = sourced(
+            vec![
+                HttpResponse::new(401, ""),
+                HttpResponse::new(503, ""),
+                json(PATIENT),
+            ],
+            "token-b",
+        );
+        block_on(c.read("Patient", "p1")).unwrap();
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![None, Some("token-a".to_string()), None]
+        );
+        assert_eq!(
+            bearers(&c),
+            ["Bearer token-a", "Bearer token-b", "Bearer token-b"]
+        );
+    }
+
+    /// A transport whose failure already carries a reason.
+    struct Typed;
+
+    impl Transport for Typed {
+        async fn send(&self, _: HttpRequest) -> Result<HttpResponse, CliError> {
+            Err(CliError::Upstream("blocked".into()).because(Reason::ClientBlocked))
+        }
+    }
+
+    #[test]
+    fn a_reason_the_transport_set_is_kept() {
+        let c = FhirClient::new(Typed, BASE, "pk-test", "0")
+            .unwrap()
+            .sleeper(|_| {});
+        let err = block_on(c.read("Patient", "p1")).unwrap_err();
+        assert_eq!(err.reason(), Some(Reason::ClientBlocked));
+    }
+
+    #[test]
+    fn a_client_is_send_and_sync_whatever_its_bearer() {
+        fn send_sync<C: Send + Sync>(_: &C) {}
+        let c = FhirClient::new(BlockingStub, BASE, "pk-test", "0")
+            .unwrap()
+            .bearer_with(|_| Ok(Secret::new("t")))
+            .on_retry(|_| {});
+        send_sync(&c);
+    }
+
+    /// A transport that is itself `Send + Sync`, unlike the test doubles
+    /// above, which keep their state in `RefCell`s.
+    struct BlockingStub;
+
+    impl Transport for BlockingStub {
+        async fn send(&self, _: HttpRequest) -> Result<HttpResponse, CliError> {
+            Ok(json(PATIENT))
+        }
     }
 
     #[test]
@@ -994,7 +1066,7 @@ mod tests {
             (3, Some(Reason::CredentialRefused))
         );
         assert_eq!(c.transport().seen.borrow().len(), 1);
-        assert_eq!(calls.borrow().len(), 2);
+        assert_eq!(calls.lock().unwrap().len(), 2);
 
         // A renewed token refused too: no second renewal, no loop.
         let (c, calls) = sourced(
@@ -1006,7 +1078,7 @@ mod tests {
             3
         );
         assert_eq!(c.transport().seen.borrow().len(), 2);
-        assert_eq!(calls.borrow().len(), 2);
+        assert_eq!(calls.lock().unwrap().len(), 2);
     }
 
     #[test]
@@ -1033,17 +1105,17 @@ mod tests {
 
     #[test]
     fn each_wait_is_reported_without_the_query() {
-        let lines: Rc<RefCell<Vec<String>>> = Rc::default();
+        let lines: Arc<Mutex<Vec<String>>> = Arc::default();
         let log = lines.clone();
         let c = client(vec![
             HttpResponse::new(429, "").header("retry-after", "2"),
             HttpResponse::new(503, ""),
             page(&obs("o1"), None),
         ])
-        .on_retry(move |line| log.borrow_mut().push(line.to_string()));
+        .on_retry(move |line| log.lock().unwrap().push(line.to_string()));
         block_on(c.search("Observation", &[("patient", "p1".into())])).unwrap();
         assert_eq!(
-            *lines.borrow(),
+            *lines.lock().unwrap(),
             [
                 "the FHIR server at https://fhir.example.test answered HTTP 429 for Observation; asking again in 2 s (2 of 3)",
                 "the FHIR server at https://fhir.example.test answered HTTP 503 for Observation; asking again in 2 s (3 of 3)",
@@ -1051,7 +1123,7 @@ mod tests {
         );
 
         let log = lines.clone();
-        lines.borrow_mut().clear();
+        lines.lock().unwrap().clear();
         let flaky = FhirClient::new(
             Flaky {
                 failures: RefCell::new(1),
@@ -1063,10 +1135,10 @@ mod tests {
         )
         .unwrap()
         .sleeper(|_| {})
-        .on_retry(move |line| log.borrow_mut().push(line.to_string()));
+        .on_retry(move |line| log.lock().unwrap().push(line.to_string()));
         block_on(flaky.read("Patient", "p1")).unwrap();
         assert_eq!(
-            *lines.borrow(),
+            *lines.lock().unwrap(),
             ["could not reach the FHIR server at https://fhir.example.test for Patient; asking again in 1 s (2 of 3)"]
         );
     }
