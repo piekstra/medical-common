@@ -111,11 +111,31 @@ impl<'a, T: Transport> Renewer<'a, T> {
         })
     }
 
+    /// Grant and store under the lock. A grant the server refused
+    /// (`Reason::CredentialRefused`) stamps `refused_at` on the stored
+    /// session and keeps the rest; one it accepts clears it.
     fn grant_and_store(&self, latest: SmartSession, now: u64) -> Result<SmartSession, CliError> {
-        let tokens = pk_cli_core::block_on(self.grant(&latest, now))?;
-        let renewed = SmartSession { tokens, ..latest };
-        self.store.save(&renewed)?;
-        Ok(renewed)
+        match pk_cli_core::block_on(self.grant(&latest, now)) {
+            Ok(tokens) => {
+                let renewed = SmartSession {
+                    tokens,
+                    refused_at: None,
+                    ..latest
+                };
+                self.store.save(&renewed)?;
+                Ok(renewed)
+            }
+            Err(refused) if refused.reason() == Some(Reason::CredentialRefused) => {
+                // The refusal is the answer the caller needs; a failure to
+                // record it is not reported over it.
+                let _ = self.store.save(&SmartSession {
+                    refused_at: Some(now),
+                    ..latest
+                });
+                Err(refused)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     async fn grant(&self, session: &SmartSession, now: u64) -> Result<TokenSet, CliError> {

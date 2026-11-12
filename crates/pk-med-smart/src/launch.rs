@@ -150,6 +150,7 @@ impl SmartSignIn {
             scope: self.scope.clone(),
             tokens,
             dynamic_client: None,
+            refused_at: None,
             extra: Map::new(),
         })
     }

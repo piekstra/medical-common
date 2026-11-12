@@ -22,7 +22,9 @@ renames). A consumer moves its own `pk-cli-*` to v0.31.1 in the same change.
   - `Renewer::fresh`, `renew` and `after_refusal` under `RefreshLock`. A
     refresh asks for the scope granted. A renewer for another client is
     refused. A registered client's signer is made from the session read
-    under the lock (`SignerFor`).
+    under the lock (`SignerFor`). A refused grant stamps
+    `SmartSession::refused_at` and keeps the sign-in; the next use tries
+    one grant, and an accepted one clears it.
   - `register_dynamic_client` (registration only; the first JWT-bearer
     grant is the `Renewer`'s, so a failed grant loses no client) and
     `jwt_bearer_tokens`, with `JwtSigner` and `signed_assertion` (Epic),
