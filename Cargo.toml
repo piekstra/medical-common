@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["crates/pk-med-fhir", "crates/pk-med-records", "crates/pk-med-smart"]
+members = ["crates/pk-med-fhir", "crates/pk-med-records", "crates/pk-med-smart", "crates/pk-med-dicom"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.89"
 license = "MIT OR Apache-2.0"
@@ -18,11 +18,13 @@ pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" 
 pk-cli-secrets = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
 pk-cli-auth = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
 pk-cli-http = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
-pk-med-fhir = { path = "crates/pk-med-fhir", version = "0.2.0" }
+pk-med-fhir = { path = "crates/pk-med-fhir", version = "0.3.0" }
 serde = { version = "1", features = ["derive"] }
 # raw_value: a resource is kept as the server's own text (pk_med_fhir::raw).
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 base64 = "0.22"
 zeroize = "1"
+# The deflated transfer syntax, in pk-med-dicom.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # The mock server's PKCE S256 check (feature test-util only).
 sha2 = "0.11"

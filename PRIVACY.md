@@ -34,8 +34,10 @@ run time. Nothing here sends them anywhere but the program that asked.
 2. `crates/pk-med-records/tests/no_personal_data.rs` scans every tracked
    file for the shapes personal data takes: phone and member numbers, Social
    Security numbers, emails, street addresses, birth dates.
-3. CI runs gitleaks on every push and pull request.
-4. Before every commit, read the diff for values that look real.
+3. DICOM test files are written at run time by `pk_med_dicom::synthetic`,
+   every value a dummy; no DICOM file is committed.
+4. CI runs gitleaks on every push and pull request.
+5. Before every commit, read the diff for values that look real.
 
 ## Examples in docs
 

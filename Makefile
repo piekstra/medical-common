@@ -18,7 +18,8 @@ test:
 	$(CARGO) test --workspace --all-features
 
 # Each crate builds and lints with and without each feature: the mock server
-# never leaks into a consumer's normal build, and `rsa` stays optional.
+# and the synthetic DICOM writer never leak into a consumer's normal build,
+# and `rsa` stays optional.
 feature-check:
 	$(CARGO) clippy -p pk-med-fhir --lib -- -D warnings
 	$(CARGO) clippy -p pk-med-records --lib -- -D warnings
@@ -26,6 +27,8 @@ feature-check:
 	$(CARGO) clippy -p pk-med-records --lib --features test-util -- -D warnings
 	$(CARGO) clippy -p pk-med-smart --lib -- -D warnings
 	$(CARGO) clippy -p pk-med-smart --lib --features rsa -- -D warnings
+	$(CARGO) clippy -p pk-med-dicom --lib -- -D warnings
+	$(CARGO) clippy -p pk-med-dicom --lib --features test-util -- -D warnings
 
 deny:
 	$(CARGO) deny check
