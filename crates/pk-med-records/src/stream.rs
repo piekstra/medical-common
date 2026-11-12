@@ -15,9 +15,8 @@ use std::fmt;
 use std::io::{BufRead, Write};
 
 use pk_cli_core::CliError;
-use pk_med_fhir::{minify, RawResource, FHIR_VERSION};
+use pk_med_fhir::{describe_json_error, minify, RawResource, FHIR_VERSION};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::dto::{method, Organization, PatientContext};
 
@@ -264,9 +263,10 @@ impl<W: Write> RecordsWriter<W> {
         })
     }
 
-    /// A lower line limit than [`MAX_LINE_BYTES`].
+    /// A lower line limit than [`MAX_LINE_BYTES`]. A higher one is held at
+    /// [`MAX_LINE_BYTES`], so every line written is one a default reader reads.
     pub fn max_line_bytes(mut self, bytes: usize) -> Self {
-        self.max_line_bytes = bytes;
+        self.max_line_bytes = bytes.min(MAX_LINE_BYTES);
         self
     }
 
@@ -328,7 +328,8 @@ impl<W: Write> RecordsWriter<W> {
         &self.counts
     }
 
-    /// Bytes written so far.
+    /// Bytes written so far: the header and the resource lines.
+    /// [`Finished::bytes`] adds the trailer.
     pub fn bytes(&self) -> u64 {
         self.bytes
     }
@@ -338,7 +339,7 @@ impl<W: Write> RecordsWriter<W> {
         mut self,
         finished_at: impl Into<String>,
         error: Option<&CliError>,
-    ) -> Result<Trailer, CliError> {
+    ) -> Result<Finished, CliError> {
         let trailer = Trailer {
             schema: END_SCHEMA.into(),
             complete: error.is_none(),
@@ -351,8 +352,20 @@ impl<W: Write> RecordsWriter<W> {
             .map_err(|e| CliError::Other(format!("serializing the stream trailer: {e}")))?;
         writeln!(self.out, "{line}").map_err(write_error)?;
         self.out.flush().map_err(write_error)?;
-        Ok(trailer)
+        Ok(Finished {
+            trailer,
+            bytes: self.bytes + line.len() as u64 + 1,
+        })
     }
+}
+
+/// What [`RecordsWriter::finish`] wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Finished {
+    pub trailer: Trailer,
+    /// Every byte of the stream, the trailer line included: the size of
+    /// `records.ndjson` for `records-export/v1`.
+    pub bytes: u64,
 }
 
 /// One line after the header.
@@ -450,6 +463,22 @@ impl From<StreamError> for CliError {
     }
 }
 
+/// What a line is, read without reading the rest of it.
+#[derive(Deserialize)]
+struct LineKind {
+    #[serde(default, rename = "resourceType")]
+    resource_type: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    schema: Option<serde::de::IgnoredAny>,
+}
+
+/// The first line's schema.
+#[derive(Deserialize)]
+struct HeaderKind {
+    #[serde(default)]
+    schema: Option<String>,
+}
+
 /// Reads a stream: [`RecordsReader::header`], then each [`Item`], the trailer
 /// last, checked against the lines read.
 pub struct RecordsReader<R: BufRead> {
@@ -481,22 +510,35 @@ impl<R: BufRead> RecordsReader<R> {
         self
     }
 
-    /// The header, read on first call.
+    /// The header, read on first call. After a header that did not read,
+    /// every later call fails too and the iterator yields nothing: no later
+    /// line is ever taken for the header.
     pub fn header(&mut self) -> Result<&Header, StreamError> {
         if self.header.is_none() {
-            let Some(line) = self.next_line()? else {
-                return Err(StreamError::MissingHeader);
-            };
-            let value: Value =
-                serde_json::from_slice(&line).map_err(|_| StreamError::MissingHeader)?;
-            if value.get("schema").and_then(Value::as_str) != Some(STREAM_SCHEMA) {
+            if self.done {
                 return Err(StreamError::MissingHeader);
             }
-            let header: Header =
-                serde_json::from_value(value).map_err(|e| StreamError::BadHeader(e.to_string()))?;
-            self.header = Some(header);
+            match self.read_header() {
+                Ok(header) => self.header = Some(header),
+                Err(e) => {
+                    self.done = true;
+                    return Err(e);
+                }
+            }
         }
         Ok(self.header.as_ref().expect("read above"))
+    }
+
+    fn read_header(&mut self) -> Result<Header, StreamError> {
+        let Some(line) = self.next_line()? else {
+            return Err(StreamError::MissingHeader);
+        };
+        let kind: HeaderKind =
+            serde_json::from_slice(&line).map_err(|_| StreamError::MissingHeader)?;
+        if kind.schema.as_deref() != Some(STREAM_SCHEMA) {
+            return Err(StreamError::MissingHeader);
+        }
+        serde_json::from_slice(&line).map_err(|e| StreamError::BadHeader(describe_json_error(&e)))
     }
 
     /// Resource lines read so far, by type.
@@ -518,7 +560,8 @@ impl<R: BufRead> RecordsReader<R> {
                     Some(i) => (&buf[..i], Some(i)),
                     None => (buf, None),
                 };
-                if line.len() + chunk.len() > self.max_line_bytes {
+                // One byte over the limit is kept a moment: a CRLF line's `\r`.
+                if line.len() + chunk.len() > self.max_line_bytes + 1 {
                     too_long = true;
                 } else {
                     line.extend_from_slice(chunk);
@@ -540,14 +583,14 @@ impl<R: BufRead> RecordsReader<R> {
                 continue;
             }
             self.line += 1;
-            if too_long {
+            if !too_long && line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            if too_long || line.len() > self.max_line_bytes {
                 return Err(StreamError::LineTooLong {
                     line: self.line,
                     max: self.max_line_bytes,
                 });
-            }
-            if line.last() == Some(&b'\r') {
-                line.pop();
             }
             if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
@@ -572,27 +615,41 @@ impl<R: BufRead> RecordsReader<R> {
             line: number,
             error: e.to_string(),
         })?;
-        let value: Value = serde_json::from_str(text).map_err(|e| StreamError::BadJson {
+        if !text.trim_start().starts_with('{') {
+            // JSON that is not an object, or no JSON at all.
+            return Err(match serde_json::from_str::<serde::de::IgnoredAny>(text) {
+                Ok(_) => StreamError::NotAResource { line: number },
+                Err(e) => StreamError::BadJson {
+                    line: number,
+                    error: describe_json_error(&e),
+                },
+            });
+        }
+        // The same reading the writer's `RawResource::parse` gives a line, so
+        // every line a writer wrote reads back: no line is parsed into a
+        // `Value`, which refuses some text a resource may carry (`1e400`).
+        let kind: LineKind = serde_json::from_str(text).map_err(|e| StreamError::BadJson {
             line: number,
-            error: e.to_string(),
+            error: describe_json_error(&e),
         })?;
-        if value.get("resourceType").is_some() {
-            let resource = RawResource::parse(text).map_err(|e| StreamError::BadJson {
-                line: number,
-                error: e.message().to_string(),
-            })?;
+        if kind.resource_type.is_some() {
+            let resource =
+                RawResource::parse(text).map_err(|_| StreamError::NotAResource { line: number })?;
             *self
                 .counts
                 .entry(resource.resource_type.clone())
                 .or_insert(0) += 1;
             return Ok(Some(Item::Resource(resource)));
         }
-        if value.get("schema").and_then(Value::as_str) == Some(END_SCHEMA) {
+        if kind.schema.is_some() {
             let trailer: Trailer =
-                serde_json::from_value(value).map_err(|e| StreamError::BadJson {
+                serde_json::from_str(text).map_err(|e| StreamError::BadJson {
                     line: number,
-                    error: e.to_string(),
+                    error: describe_json_error(&e),
                 })?;
+            if trailer.schema != END_SCHEMA {
+                return Err(StreamError::NotAResource { line: number });
+            }
             self.trailer_seen = true;
             if !trailer.complete {
                 return Err(StreamError::Incomplete {
@@ -643,6 +700,7 @@ impl<R: BufRead> Iterator for RecordsReader<R> {
 mod tests {
     use super::*;
     use crate::dto::relationship;
+    use serde_json::Value;
 
     fn header() -> Header {
         Header::new(
@@ -740,7 +798,7 @@ mod tests {
             .unwrap()
             .max_line_bytes(40);
         assert!(!w.resource(&obs("o1")).unwrap());
-        let t = w.finish("t", None).unwrap();
+        let t = w.finish("t", None).unwrap().trailer;
         assert_eq!(t.skipped[0].code, skip::TOO_LARGE);
         assert!(t.counts.is_empty());
     }
@@ -751,7 +809,7 @@ mod tests {
         let mut w = RecordsWriter::start(&mut buf, &header()).unwrap();
         w.resource(&obs("o1")).unwrap();
         let err = CliError::Upstream("the FHIR server answered HTTP 503".into());
-        let t = w.finish("t", Some(&err)).unwrap();
+        let t = w.finish("t", Some(&err)).unwrap().trailer;
         assert!(!t.complete);
         let e = t.error.as_ref().unwrap();
         assert_eq!((e.code.as_str(), e.exit_code), ("upstream", Some(5)));
@@ -862,5 +920,76 @@ mod tests {
         assert_eq!(s.code, skip::FORBIDDEN);
         let s = Skip::from_error("Binary", "", &CliError::NotFound("gone".into()));
         assert_eq!((s.code.as_str(), s.id.as_deref()), (skip::NOT_FOUND, None));
+    }
+
+    #[test]
+    fn every_line_a_writer_takes_reads_back() {
+        // Valid JSON a `Value` refuses: a decimal past f64, a lone surrogate.
+        let odd = [
+            r#"{"resourceType":"Observation","id":"big","valueQuantity":{"value":1e400}}"#,
+            r#"{"resourceType":"Observation","id":"half","note":[{"text":"ab\ud83d"}]}"#,
+        ];
+        let text = written(|w| {
+            for line in odd {
+                assert!(w.resource(&RawResource::parse(line).unwrap()).unwrap());
+            }
+        });
+        let mut reader = RecordsReader::new(text.as_bytes());
+        let items: Vec<Item> = reader.by_ref().map(Result::unwrap).collect();
+        assert_eq!(items.len(), 3);
+        assert!(matches!(&items[0], Item::Resource(r) if r.raw.contains("1e400")));
+        assert!(matches!(&items[2], Item::Trailer(t) if t.complete));
+    }
+
+    #[test]
+    fn a_header_that_did_not_read_stays_refused() {
+        let good = written(|w| {
+            w.resource(&obs("o1")).unwrap();
+        });
+        let text = format!("this is not a header\n{good}");
+        let mut reader = RecordsReader::new(text.as_bytes());
+        assert!(matches!(reader.header(), Err(StreamError::MissingHeader)));
+        assert!(matches!(reader.header(), Err(StreamError::MissingHeader)));
+        assert!(reader.next().is_none(), "no later line becomes the header");
+    }
+
+    #[test]
+    fn a_crlf_line_at_the_limit_reads() {
+        let text = written(|w| {
+            w.resource(&obs("o1")).unwrap();
+        });
+        let longest = text.lines().map(str::len).max().unwrap();
+        let crlf = text.replace('\n', "\r\n");
+        let reader = RecordsReader::new(crlf.as_bytes()).max_line_bytes(longest);
+        assert!(reader.map(Result::unwrap).count() == 2);
+        let reader = RecordsReader::new(crlf.as_bytes()).max_line_bytes(longest - 1);
+        assert!(reader
+            .into_iter()
+            .any(|i| matches!(i, Err(StreamError::LineTooLong { .. }))));
+    }
+
+    #[test]
+    fn finish_counts_every_byte_and_the_limit_is_capped() {
+        let mut buf = Vec::new();
+        let mut w = RecordsWriter::start(&mut buf, &header())
+            .unwrap()
+            .max_line_bytes(usize::MAX);
+        assert_eq!(w.max_line_bytes, MAX_LINE_BYTES);
+        w.resource(&obs("o1")).unwrap();
+        let finished = w.finish("t", None).unwrap();
+        assert_eq!(finished.bytes, buf.len() as u64);
+    }
+
+    #[test]
+    fn a_header_error_names_no_value() {
+        let text = concat!(
+            r#"{"schema":"records-stream/v1","source":{"cli":"x","version":"0"},"organization":{"id":"o","name":"n","fhir_base":"https://h.test"},"patient":{"id":"p","name":424242},"pulled_at":"t"}"#,
+            "\n"
+        );
+        let err = RecordsReader::new(text.as_bytes())
+            .header()
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("424242"), "{err}");
     }
 }

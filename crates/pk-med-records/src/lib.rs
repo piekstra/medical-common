@@ -25,6 +25,6 @@ pub use dto::{
 pub use export::{create_export_file, EXPORT_FILE};
 pub use pk_med_fhir::RawResource;
 pub use stream::{
-    Header, Item, RecordsReader, RecordsWriter, Skip, Source, StreamError, Trailer, TrailerError,
-    END_SCHEMA, MAX_LINE_BYTES, STREAM_SCHEMA,
+    Finished, Header, Item, RecordsReader, RecordsWriter, Skip, Source, StreamError, Trailer,
+    TrailerError, END_SCHEMA, MAX_LINE_BYTES, STREAM_SCHEMA,
 };

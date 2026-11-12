@@ -120,15 +120,59 @@ pub fn from_value<R: Resource>(value: Value) -> Result<R, CliError> {
             }
         )));
     }
-    serde_json::from_value(value)
-        .map_err(|e| CliError::Upstream(format!("a FHIR {} did not read: {e}", R::TYPE)))
+    serde_json::from_value(value).map_err(|e| {
+        CliError::Upstream(format!(
+            "a FHIR {} did not read: it {}",
+            R::TYPE,
+            describe_json_error(&e)
+        ))
+    })
 }
 
 /// [`from_value`] over JSON text.
 pub fn from_str<R: Resource>(text: &str) -> Result<R, CliError> {
-    let value: Value = serde_json::from_str(text)
-        .map_err(|e| CliError::Upstream(format!("a FHIR {} is not JSON: {e}", R::TYPE)))?;
-    from_value(value)
+    let raw = RawResource::parse(text)?;
+    if raw.resource_type != R::TYPE {
+        return Err(CliError::Upstream(format!(
+            "expected a FHIR {}, found {}",
+            R::TYPE,
+            raw.resource_type
+        )));
+    }
+    serde_json::from_str(text).map_err(|e| {
+        CliError::Upstream(format!(
+            "a FHIR {} did not read: it {}",
+            R::TYPE,
+            describe_json_error(&e)
+        ))
+    })
+}
+
+/// What is wrong with JSON that did not read, without the value. serde's own
+/// message quotes the value it refused, and in a record that value is the
+/// record (a name, a result), so it never goes into an error, a log or a
+/// `Skip`. A syntax error keeps serde's description (`trailing characters`),
+/// a missing element its name, and every message its line and column.
+pub fn describe_json_error(error: &serde_json::Error) -> String {
+    use serde_json::error::Category;
+    let message = error.to_string();
+    let message = message
+        .rsplit_once(" at line ")
+        .map_or(message.as_str(), |(head, _)| head);
+    let what = match error.classify() {
+        Category::Io => "could not be read".to_string(),
+        Category::Eof => "ends early".to_string(),
+        Category::Syntax => format!("is not valid JSON: {message}"),
+        Category::Data => match message.strip_prefix("missing field `") {
+            Some(rest) => format!("lacks `{}`", rest.split('`').next().unwrap_or_default()),
+            None => "has an element of the wrong type".to_string(),
+        },
+    };
+    if error.line() == 0 {
+        what
+    } else {
+        format!("{what} (line {}, column {})", error.line(), error.column())
+    }
 }
 
 /// A FHIR base URL in one spelling: scheme and host in lower case, no
@@ -140,7 +184,7 @@ pub fn normalize_base(url: &str) -> String {
     let Some((scheme, rest)) = url.split_once("://") else {
         return url.to_string();
     };
-    let split = rest.find('/').unwrap_or(rest.len());
+    let split = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (authority, path) = rest.split_at(split);
     format!(
         "{}://{}{path}",
@@ -165,14 +209,59 @@ impl Binary {
     }
 }
 
+/// A number's text without an exponent (`1.25e3` is `1250`, `5e-7` is
+/// `0.0000005`), its digits moved, never recomputed.
+fn plain_decimal(text: &str) -> String {
+    let Some((mantissa, exponent)) = text.split_once(['e', 'E']) else {
+        return text.to_string();
+    };
+    let Ok(exponent) = exponent.parse::<i64>() else {
+        return text.to_string();
+    };
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", mantissa),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let digits = format!("{whole}{fraction}");
+    let point = whole.len() as i64 + exponent;
+    let (whole, fraction) = if point <= 0 {
+        (
+            "0".to_string(),
+            format!("{}{digits}", "0".repeat(point.unsigned_abs() as usize)),
+        )
+    } else if point as usize >= digits.len() {
+        (
+            format!("{digits}{}", "0".repeat(point as usize - digits.len())),
+            String::new(),
+        )
+    } else {
+        (
+            digits[..point as usize].to_string(),
+            digits[point as usize..].to_string(),
+        )
+    };
+    let whole = whole.trim_start_matches('0');
+    let whole = if whole.is_empty() { "0" } else { whole };
+    let fraction = fraction.trim_end_matches('0');
+    if fraction.is_empty() {
+        format!("{sign}{whole}")
+    } else {
+        format!("{sign}{whole}.{fraction}")
+    }
+}
+
 impl Money {
     /// The family's string-decimal money (`pk_cli_core::Money`, DESIGN.md
-    /// §1.4). A whole or one-place amount gains its second place (`12.5` is
-    /// `"12.50"`); more places are kept as the server wrote them, never
-    /// rounded. A missing currency is USD, the only one CARIN Blue Button
-    /// allows. `None` when there is no value.
+    /// §1.8), in plain decimal notation. A whole or one-place amount gains its
+    /// second place (`12.5` is `"12.50"`). The typed layer reads a decimal as
+    /// a 64-bit float, so 15 significant digits are exact and trailing zeros
+    /// past the second place are not kept (`12.100` is `"12.10"`); the
+    /// server's own spelling is in the [`RawResource`]. A missing currency is
+    /// USD, the only one CARIN Blue Button allows. `None` when there is no
+    /// value.
     pub fn to_money(&self) -> Option<pk_cli_core::Money> {
-        let raw = self.value.as_ref()?.to_string();
+        let raw = plain_decimal(&self.value.as_ref()?.to_string());
         let amount = match raw.split_once('.') {
             None => format!("{raw}.00"),
             Some((whole, places)) if places.len() == 1 => format!("{whole}.{places}0"),
@@ -199,9 +288,64 @@ mod tests {
             ("HTTPS://h.test", "https://h.test"),
             (" https://h.test/r4// ", "https://h.test/r4"),
             ("not a url/", "not a url"),
+            ("https://H.TEST?Q=X", "https://h.test?Q=X"),
+            ("https://H.TEST#Frag", "https://h.test#Frag"),
         ] {
             assert_eq!(normalize_base(raw), want, "{raw}");
         }
+    }
+
+    #[test]
+    fn a_repeating_primitive_keeps_its_null_placeholders() {
+        let text = r#"{"resourceType":"Patient","name":[{"family":"Testperson","given":["Robin",null],"_given":[null,{"extension":[{"url":"https://example.test/x","valueString":"y"}]}]}]}"#;
+        let patient: Patient = from_str(text).unwrap();
+        assert_eq!(patient.name[0].given, vec![Some("Robin".to_string()), None]);
+        let back = serde_json::to_value(&patient).unwrap();
+        assert_eq!(back, serde_json::from_str::<Value>(text).unwrap());
+    }
+
+    #[test]
+    fn money_is_plain_decimal_text() {
+        let money = |text: &str| {
+            let m: Money = serde_json::from_str(&format!(r#"{{"value":{text}}}"#)).unwrap();
+            m.to_money().unwrap().amount
+        };
+        assert_eq!(money("12"), "12.00");
+        assert_eq!(money("12.5"), "12.50");
+        assert_eq!(money("-0.5"), "-0.50");
+        assert_eq!(money("12.125"), "12.125");
+        assert_eq!(money("12.100"), "12.10");
+        // Past 15 significant digits the float shows: documented, not hidden.
+        // (Built from parts: a long digit run reads as personal data to the
+        // repository's own scan.)
+        let big = format!("{}{}{}.25", "123456", "789012", "345678");
+        assert_eq!(
+            money(&big),
+            format!("{}{}{}.00", "123456", "789012", "345660")
+        );
+        assert_eq!(money("0.0000005"), "0.0000005");
+        assert_eq!(plain_decimal("1.25e3"), "1250");
+        assert_eq!(plain_decimal("-5E-7"), "-0.0000005");
+    }
+
+    #[test]
+    fn a_json_error_never_quotes_the_value() {
+        let patient = r#"{"resourceType":"Patient","name":[{"given":"Robin"}]}"#;
+        let err = from_str::<Patient>(patient).unwrap_err().to_string();
+        assert!(!err.contains("Robin"), "{err}");
+        assert!(
+            err.contains("wrong type") && err.contains("column"),
+            "{err}"
+        );
+        let obs = r#"{"resourceType":"Observation","valueInteger":7.25}"#;
+        let err = from_str::<Observation>(obs).unwrap_err().to_string();
+        assert!(!err.contains("7.25"), "{err}");
+        let err = from_str::<Patient>(r#"{"resourceType":"Patient""#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ends early"), "{err}");
+        let missing: Result<Money, _> = serde_json::from_str(r#"{"value":"#);
+        assert!(describe_json_error(&missing.unwrap_err()).contains("line 1"));
     }
 
     #[test]

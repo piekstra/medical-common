@@ -170,8 +170,17 @@ second JSON document. A failure of one search or one file is a `Skip`, not a
 stop.
 
 **Limits.** No line is over `MAX_LINE_BYTES`, 64 MiB (a Binary of about 48
-MiB). The writer skips a larger resource as `too_large`; the reader refuses
-a larger line as `LineTooLong` without holding it in memory.
+MiB), not counting its line ending. The writer skips a larger resource as
+`too_large` (a writer's limit can be lowered, never raised past it); the
+reader refuses a larger line as `LineTooLong` without holding it in memory.
+
+**One reading on both sides.** The writer takes a resource that
+`RawResource::parse` reads: a JSON object with a string `resourceType`, its
+other members checked as JSON and not otherwise read. The reader classifies
+each line the same way and never builds a `serde_json::Value` of a
+resource, so every line a writer wrote reads back. A value a `Value`
+refuses (`1e400`, a lone `\ud83d`) stays the resource's own text, for the
+store to keep or refuse per resource.
 
 **Reading.** `RecordsReader` yields the header, each resource as a
 `RawResource`, then the trailer. It refuses, as `StreamError`, each mapped
@@ -180,10 +189,10 @@ to exit 5:
 | Error | When |
 |---|---|
 | `MissingHeader` | the first non-blank line is not a `records-stream/v1` header |
-| `BadHeader` | the header names the schema but does not read |
-| `BadJson { line }` | a line is not JSON, or a resource line not a resource |
+| `BadHeader` | the header names the schema but does not read; after it, the reader yields nothing |
+| `BadJson { line }` | a line is not JSON, or the trailer does not read |
 | `LineTooLong { line }` | a line is over the limit |
-| `NotAResource { line }` | a line has neither `resourceType` nor the trailer's schema |
+| `NotAResource { line }` | a line is not an object, or has neither a string `resourceType` nor the trailer's schema |
 | `AfterTrailer { line }` | a line follows the trailer |
 | `MissingTrailer` | the input ended with no trailer: the stream was cut short |
 | `CountMismatch` | the trailer's count for a type is not the number of lines read |
@@ -193,14 +202,24 @@ Blank lines and CRLF endings are accepted. A store files what it read from
 an incomplete stream as such, or not at all; it never takes a stream without
 its trailer as whole.
 
+No error, here or anywhere in these crates, quotes a value from a record.
+serde's messages do (`invalid type: string "…"`), so they are rewritten by
+`pk_med_fhir::describe_json_error`: what kind of fault, a missing element's
+name, and the line and column.
+
 ### 1.5 `records export -o <DIR>` (`records-export/v1`)
 
-The same stream, to `<DIR>/records.ndjson`, created with mode 0600 (and the
-directory with 0700 when missing) by `pk_med_records::create_export_file`,
-which refuses to write through a symbolic link. stdout gets one
-`records-export/v1` document: `{schema, path, bytes, complete, counts,
-skipped?}` (`RecordsExport::new(path, bytes, &trailer)`). Development and
-tests use it with synthetic data only.
+The same stream, to `<DIR>/records.ndjson`, by
+`pk_med_records::create_export_file`: the directory is created with mode
+0700 when missing, and the file is created new with mode 0600 under a
+temporary name (`O_EXCL`, which follows no link) and renamed into place. A
+file already at `records.ndjson`, a symbolic or a hard link included, is
+replaced and never written through; a symbolic link is refused with a
+message. stdout gets one `records-export/v1` document: `{schema, path,
+bytes, complete, counts, skipped?}`, `bytes` being the whole file, trailer
+included (`RecordsExport::new(path, &finished)`, from what
+`RecordsWriter::finish` returned). Development and tests use it with
+synthetic data only.
 
 ### 1.6 Provenance (`provenance/v1`)
 
@@ -247,11 +266,14 @@ works unchanged:
 
 ### 1.8 Money
 
-Amounts are `pk_cli_core::Money`: a string decimal and a currency, never a
-float. `pk_med_fhir::Money::to_money` converts a FHIR `Money`: a whole or
-one-place amount gains its second place (`12.5` is `12.50`), more places
-are kept as written and never rounded, and a missing currency is `USD`, the
-only one CARIN Blue Button allows.
+Amounts are `pk_cli_core::Money`: a string decimal and a currency.
+`pk_med_fhir::Money::to_money` converts a typed FHIR `Money` to plain
+decimal text (never an exponent). A whole or one-place amount gains its
+second place (`12.5` is `12.50`), and a missing currency is `USD`, the only
+one CARIN Blue Button allows. The typed layer reads a decimal as a 64-bit
+float, so up to 15 significant digits are exact and trailing zeros past the
+second place are not kept (`12.100` is `12.10`). The server's own spelling
+is in the `RawResource`, which a store keeps.
 
 ### 1.9 Versioning
 
@@ -281,6 +303,10 @@ else's.
   extensions, choice types not named, later profiles' elements) is kept in
   each type's `extra` map, so a resource read and written back holds the
   same elements (a test checks this for every synthetic resource).
+- A repeating primitive (`HumanName.given`, `Address.line`,
+  `Meta.profile`, ...) is `Vec<Option<T>>`: FHIR writes `null` in it where
+  only the `_given` extension has a value, and the nulls are kept so the two
+  arrays stay aligned.
 - A decimal is a `serde_json::Number`: the value survives a typed round
   trip, its spelling may not. The spelling is kept by `RawResource`, which
   never parses a number; streams and stores are written from it.
@@ -305,10 +331,15 @@ code runs over `pk_cli_http::BlockingTransport` (driven with
   (`header("Epic-Client-ID", …)`) never leave it. A `next` link or a Binary
   reference on another origin is refused (exit 5). The base must be `https`,
   or `http` to this machine for a test server.
-- Ids and types are checked before any request (exit 2).
-- A 429, a 5xx, or an edge's HTML 403 is asked again under `RetryPolicy`
-  (3 requests, 1 s then 2 s apart, or the server's `Retry-After`, 30 s at
-  most; a server asking for longer is not waited for).
+- Ids and types are checked before any request (exit 2). A path or a
+  reference with a `.` or `..` segment, spelled out or percent-encoded, is
+  refused (exit 2): a URL parser would climb out of the base.
+- A 429, a 5xx, an edge's HTML 403, or a connection that failed is asked
+  again under `RetryPolicy` (3 requests, 1 s then 2 s apart, or the
+  server's `Retry-After`, 30 s at most; a server asking for longer is not
+  waited for).
+- A `next` link equal to the page just read ends the search with
+  `truncated: true`, as the page cap does.
 
 Refusals map to exit codes (`pk_med_fhir::outcome::status_error`):
 
@@ -321,8 +352,8 @@ Refusals map to exit codes (`pk_med_fhir::outcome::status_error`):
 | 400, 422, any other 4xx | 5, `Reason::BadRequest` |
 | a 3xx | 5: redirects are not followed |
 
-An OperationOutcome in the body refines a 4xx by its first error issue's
-code: `login`, `unknown`, `expired` give 3 (`CredentialRefused`);
+An OperationOutcome in the body refines a 4xx by its first issue of
+severity `error` or `fatal` (a warning never does), by the issue's code: `login`, `unknown`, `expired` give 3 (`CredentialRefused`);
 `forbidden`, `suppressed`, `security` 3 (`Forbidden`); `not-found`,
 `deleted` 4; `throttled`, `transient`, `timeout`, `exception` 5. An
 OperationOutcome with errors in place of a resource with a 2xx is mapped the

@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use pk_cli_core::Paged;
 use serde::{Deserialize, Serialize};
 
-use crate::stream::{Header, Skip, Trailer};
+use crate::stream::{Finished, Header, Skip};
 use pk_med_fhir::RawResource;
 
 /// The profile's name, for `info`.
@@ -256,11 +256,14 @@ pub struct RecordsExport {
 }
 
 impl RecordsExport {
-    pub fn new(path: impl Into<String>, bytes: u64, trailer: &Trailer) -> Self {
+    /// The summary of a stream written to `path`, from what
+    /// [`crate::RecordsWriter::finish`] returned.
+    pub fn new(path: impl Into<String>, finished: &Finished) -> Self {
+        let trailer = &finished.trailer;
         RecordsExport {
             schema: EXPORT_SCHEMA.into(),
             path: path.into(),
-            bytes,
+            bytes: finished.bytes,
             complete: trailer.complete,
             counts: trailer.counts.clone(),
             skipped: trailer.skipped.clone(),

@@ -46,5 +46,5 @@ pub fn write_synthetic_stream(out: impl Write) -> Result<Trailer, CliError> {
     for resource in synthetic_all() {
         writer.resource(&resource)?;
     }
-    writer.finish("2020-01-03T00:01:00Z", None)
+    Ok(writer.finish("2020-01-03T00:01:00Z", None)?.trailer)
 }

@@ -9,8 +9,8 @@
 //! | 400, 422, any other 4xx | `Upstream`, `Reason::BadRequest` | 5 |
 //! | a 3xx | `Upstream`: redirects are not followed | 5 |
 //!
-//! An OperationOutcome in the body refines a 4xx by its first error issue's
-//! code: `login`, `unknown`, `expired` are 3 with `CredentialRefused`;
+//! An OperationOutcome in the body refines a 4xx by its first issue of
+//! severity `error` or `fatal` (a warning never does), by the issue's code: `login`, `unknown`, `expired` are 3 with `CredentialRefused`;
 //! `forbidden`, `suppressed`, `security` 3 with `Forbidden`; `not-found`,
 //! `deleted` 4; `throttled`, `transient`, `timeout`, `exception` 5. Messages
 //! name the server's origin and the resource type, never a query, an id or a
@@ -22,12 +22,12 @@ use pk_cli_core::{CliError, Reason};
 use crate::resources::{OperationOutcome, OperationOutcomeIssue};
 
 impl OperationOutcome {
-    /// The first issue of severity `fatal` or `error`, else the first issue.
+    /// The first issue of severity `fatal` or `error`. A warning or an
+    /// information issue never refines an exit code.
     pub fn first_error(&self) -> Option<&OperationOutcomeIssue> {
         self.issue
             .iter()
             .find(|i| matches!(i.severity.as_deref(), Some("fatal" | "error")))
-            .or_else(|| self.issue.first())
     }
 
     /// Whether any issue is `fatal` or `error`.
