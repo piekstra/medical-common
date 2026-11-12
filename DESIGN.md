@@ -330,7 +330,20 @@ code runs over `pk_cli_http::BlockingTransport` (driven with
   server wrote it, up to a page cap (`page_cap`, default 100), and reports
   `pages`, `truncated` (pages left at the cap), `total`, and its entries
   sorted by search mode: `resources` (`match`), `included` (`include`),
-  `outcomes` (`outcome`).
+  `outcomes` (`outcome`). An entry whose resource does not read (not an
+  object, no string `resourceType`) costs only itself: it is left out, and
+  why is in `unreadable`, naming no value of it. `RawBundle::parse` keeps
+  such an entry with `RawEntry::unreadable` set.
+- The bearer is fixed (`bearer(Secret)`) or comes from a source
+  (`bearer_with`), for a run longer than the token lasts. A source is
+  called before every request, a retry included, with no argument. After
+  a 401 it is called once more with the refused token, so it can renew
+  (`pk_med_smart::Renewer::after_refusal`). The request then goes once
+  more with what it returns, unless that is the same token; a second 401
+  is the answer (exit 3). An error from the source is the request's error,
+  and nothing is sent. A fixed bearer is never renewed. The source should
+  be cheap: keep the token in memory and go to the keychain only when it
+  is due.
 - Every request goes to the base's own origin; the bearer and extra headers
   (`header("Epic-Client-ID", …)`) never leave it. A `next` link or a Binary
   reference on another origin is refused (exit 5). The base must be `https`,
@@ -341,7 +354,15 @@ code runs over `pk_cli_http::BlockingTransport` (driven with
 - A 429, a 5xx, an edge's HTML 403, or a connection that failed is asked
   again under `RetryPolicy` (3 requests, 1 s then 2 s apart, or the
   server's `Retry-After`, 30 s at most; a server asking for longer is not
-  waited for).
+  waited for). `on_retry` is told of each wait in one line (`the FHIR
+  server at https://… answered HTTP 429 for Observation; asking again in
+  5 s (2 of 3)`), so a CLI can say why it is quiet. The line names the
+  origin, the resource type and the wait, never a query, an id or a token.
+- A request that got no HTTP answer at all after its retries (the network
+  is down, the host does not resolve, the connection was reset) is exit 5
+  with reason `pk_med_fhir::UNREACHABLE` (`Reason::Provider("unreachable")`).
+  A server that answered with an error has no such reason. A CLI that skips
+  a resource type on a server's error can end the whole run on this one.
 - A `next` link equal to the page just read ends the search with
   `truncated: true`, as the page cap does.
 

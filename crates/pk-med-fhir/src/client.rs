@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use pk_cli_core::transport::{require_secure_url, HttpRequest, HttpResponse, Transport};
-use pk_cli_core::CliError;
+use pk_cli_core::{CliError, Reason};
 use pk_cli_secrets::Secret;
 
 use crate::outcome::{outcome_error, status_error};
@@ -13,6 +13,24 @@ use crate::{normalize_base, Resource, FHIR_JSON};
 
 /// How many search pages [`FhirClient::search`] follows unless told otherwise.
 pub const DEFAULT_PAGE_CAP: u32 = 100;
+
+/// The reason on an error for a request that got no HTTP answer at all (the
+/// network is down, the host does not resolve), after its retries: a caller
+/// that skips a resource on a server's error can stop a whole export on this.
+pub const UNREACHABLE: Reason = Reason::Provider("unreachable");
+
+/// A bearer that can change during a run: called before each request with
+/// `None`, and once more after a 401 with the token that was refused.
+type TokenSource = Box<dyn Fn(Option<&Secret>) -> Result<Secret, CliError>>;
+
+/// Told of each wait before a retry ([`FhirClient::on_retry`]).
+type RetryReport = Box<dyn Fn(&str)>;
+
+enum Bearer {
+    None,
+    Fixed(Secret),
+    Source(TokenSource),
+}
 
 /// Whether and how long to wait and ask again after an answer that says
 /// nothing (a 429, a 5xx, an edge's HTML 403).
@@ -66,6 +84,10 @@ pub struct SearchResult {
     pub truncated: bool,
     /// `Bundle.total` of the first page, when the server counts.
     pub total: Option<u64>,
+    /// Why each entry whose resource did not read was left out, its page's
+    /// other entries kept ([`crate::RawEntry::unreadable`]). No value of the
+    /// resource is in a reason.
+    pub unreadable: Vec<String>,
 }
 
 /// Reads and searches one FHIR server. Every request goes to the base's own
@@ -90,12 +112,13 @@ pub struct FhirClient<T> {
     origin: String,
     binary: String,
     version: String,
-    bearer: Option<Secret>,
+    bearer: Bearer,
     headers: Vec<(String, String)>,
     page_cap: u32,
     retry: RetryPolicy,
     sleeper: fn(Duration),
     clock: fn() -> i64,
+    on_retry: Option<RetryReport>,
 }
 
 impl<T: Transport> FhirClient<T> {
@@ -118,18 +141,43 @@ impl<T: Transport> FhirClient<T> {
             origin,
             binary: binary.into(),
             version: version.into(),
-            bearer: None,
+            bearer: Bearer::None,
             headers: Vec::new(),
             page_cap: DEFAULT_PAGE_CAP,
             retry: RetryPolicy::default(),
             sleeper: std::thread::sleep,
             clock: now_unix,
+            on_retry: None,
         })
     }
 
     /// Send `Authorization: Bearer <token>` on every request.
     pub fn bearer(mut self, token: Secret) -> Self {
-        self.bearer = Some(token);
+        self.bearer = Bearer::Fixed(token);
+        self
+    }
+
+    /// Take each request's bearer from `source`, for a token that lapses
+    /// during a run (an export longer than the token's hour). It is called
+    /// before every request, a retry included, with `None`. After a 401 it is
+    /// called once more with the refused token, so it can renew
+    /// (`pk_med_smart::Renewer::after_refusal`), and the request goes again
+    /// with what it returns, unless that is the same token. An error from it
+    /// is the request's error.
+    pub fn bearer_with(
+        mut self,
+        source: impl Fn(Option<&Secret>) -> Result<Secret, CliError> + 'static,
+    ) -> Self {
+        self.bearer = Bearer::Source(Box::new(source));
+        self
+    }
+
+    /// Told of each wait before a retry, with one line for a person
+    /// (`the FHIR server at https://… answered HTTP 429 for Observation;
+    /// asking again in 5 s (2 of 3)`), so a long wait is not silent. The
+    /// line names no query, id or token.
+    pub fn on_retry(mut self, report: impl Fn(&str) + 'static) -> Self {
+        self.on_retry = Some(Box::new(report));
         self
     }
 
@@ -206,6 +254,10 @@ impl<T: Transport> FhirClient<T> {
             let next = page.link("next").map(str::to_string);
             for entry in page.entry {
                 let mode = entry.search.as_ref().and_then(|s| s.mode.clone());
+                if let Some(why) = entry.unreadable {
+                    result.unreadable.push(why);
+                    continue;
+                }
                 let Some(resource) = entry.resource else {
                     continue;
                 };
@@ -354,8 +406,12 @@ impl<T: Transport> FhirClient<T> {
         )
     }
 
+    /// One GET, with its bearer, its retries and at most one renewal.
     async fn get(&self, what: &str, url: String) -> Result<HttpResponse, CliError> {
         let mut attempt = 1;
+        // A token the source gave after a 401, for the one request again.
+        let mut renewed: Option<Secret> = None;
+        let mut renewal_spent = false;
         loop {
             let mut request = HttpRequest::get(url.clone())
                 .header("Accept", FHIR_JSON)
@@ -363,30 +419,72 @@ impl<T: Transport> FhirClient<T> {
             for (name, value) in &self.headers {
                 request = request.header(name.clone(), value.clone());
             }
-            if let Some(token) = &self.bearer {
-                request = request.header("Authorization", format!("Bearer {}", token.expose()));
-            }
+            let sourced = match &self.bearer {
+                Bearer::None => None,
+                Bearer::Fixed(token) => {
+                    request = request.header("Authorization", format!("Bearer {}", token.expose()));
+                    None
+                }
+                Bearer::Source(source) => {
+                    let token = match renewed.take() {
+                        Some(token) => token,
+                        None => source(None)?,
+                    };
+                    request = request.header("Authorization", format!("Bearer {}", token.expose()));
+                    Some(token)
+                }
+            };
             let response = match self.transport.send(request).await {
                 Ok(response) => response,
                 // A connection that failed (exit 5) is asked again like a 5xx;
                 // a refusal before sending (exit 2: an insecure URL) is not.
-                Err(e) if e.exit_code() == 5 && attempt < self.retry.attempts => {
-                    (self.sleeper)(self.retry.delay * 2u32.saturating_pow(attempt - 1));
-                    attempt += 1;
-                    continue;
+                Err(e) if e.exit_code() == 5 => {
+                    if attempt < self.retry.attempts {
+                        let wait = self.backoff(attempt);
+                        self.report_retry(
+                            &format!(
+                                "could not reach the FHIR server at {} for {what}",
+                                self.origin
+                            ),
+                            wait,
+                            attempt,
+                        );
+                        (self.sleeper)(wait);
+                        attempt += 1;
+                        continue;
+                    }
+                    return Err(e.because(UNREACHABLE));
                 }
                 Err(e) => return Err(e),
             };
             if response.is_success() {
                 return Ok(response);
             }
+            if response.status == 401 && !renewal_spent {
+                if let (Bearer::Source(source), Some(refused)) = (&self.bearer, &sourced) {
+                    renewal_spent = true;
+                    let fresh = source(Some(refused))?;
+                    if fresh.expose() != refused.expose() {
+                        renewed = Some(fresh);
+                        continue;
+                    }
+                }
+            }
             let now = (self.clock)();
             if attempt < self.retry.attempts {
                 if let Some(inconclusive) = response.inconclusive(now) {
                     let wait = inconclusive
                         .retry_after
-                        .unwrap_or_else(|| self.retry.delay * 2u32.saturating_pow(attempt - 1));
+                        .unwrap_or_else(|| self.backoff(attempt));
                     if wait <= self.retry.max_wait {
+                        self.report_retry(
+                            &format!(
+                                "the FHIR server at {} answered HTTP {} for {what}",
+                                self.origin, response.status
+                            ),
+                            wait,
+                            attempt,
+                        );
                         (self.sleeper)(wait);
                         attempt += 1;
                         continue;
@@ -396,13 +494,35 @@ impl<T: Transport> FhirClient<T> {
             return Err(status_error(what, &self.origin, &response, now));
         }
     }
+
+    fn backoff(&self, attempt: u32) -> Duration {
+        self.retry.delay * 2u32.saturating_pow(attempt - 1)
+    }
+
+    fn report_retry(&self, what_happened: &str, wait: Duration, attempt: u32) {
+        if let Some(report) = &self.on_retry {
+            let secs = wait.as_secs_f64().ceil() as u64;
+            report(&format!(
+                "{what_happened}; asking again in {secs} s ({} of {})",
+                attempt + 1,
+                self.retry.attempts
+            ));
+        }
+    }
 }
 
 impl<T> std::fmt::Debug for FhirClient<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FhirClient")
             .field("base", &self.base)
-            .field("bearer", &self.bearer.is_some())
+            .field(
+                "bearer",
+                &match self.bearer {
+                    Bearer::None => "none",
+                    Bearer::Fixed(_) => "fixed",
+                    Bearer::Source(_) => "source",
+                },
+            )
             .field(
                 "headers",
                 &self.headers.iter().map(|(n, _)| n).collect::<Vec<_>>(),
@@ -483,8 +603,9 @@ fn now_unix() -> i64 {
 mod tests {
     use super::*;
     use pk_cli_core::{block_on, Reason};
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
+    use std::rc::Rc;
 
     /// Answers from a queue, keeping each request.
     #[derive(Default)]
@@ -794,5 +915,176 @@ mod tests {
             5
         );
         assert_eq!(*c.transport().sent.borrow(), 3, "3 requests at most");
+        let err = block_on(flaky(3).read("Patient", "p1")).unwrap_err();
+        assert_eq!(err.reason(), Some(UNREACHABLE));
+
+        let answered = client(vec![
+            HttpResponse::new(503, ""),
+            HttpResponse::new(503, ""),
+            HttpResponse::new(503, ""),
+        ]);
+        let err = block_on(answered.read("Patient", "p1")).unwrap_err();
+        assert_eq!(err.exit_code(), 5);
+        assert_eq!(
+            err.reason(),
+            None,
+            "a server that answered is not unreachable"
+        );
+    }
+
+    type Calls = Rc<RefCell<Vec<Option<String>>>>;
+
+    fn sourced(answers: Vec<HttpResponse>, renew_to: &'static str) -> (FhirClient<Canned>, Calls) {
+        let calls: Calls = Rc::default();
+        let log = calls.clone();
+        let renewed = Rc::new(Cell::new(false));
+        let c = FhirClient::new(Canned::with(answers), BASE, "pk-test", "0")
+            .unwrap()
+            .sleeper(|_| {})
+            .bearer_with(move |refused| {
+                log.borrow_mut()
+                    .push(refused.map(|t| t.expose().to_string()));
+                if refused.is_some() {
+                    renewed.set(true);
+                }
+                Ok(Secret::new(if renewed.get() {
+                    renew_to
+                } else {
+                    "token-a"
+                }))
+            });
+        (c, calls)
+    }
+
+    fn bearers(c: &FhirClient<Canned>) -> Vec<String> {
+        c.transport()
+            .seen
+            .borrow()
+            .iter()
+            .map(|r| r.header_value("authorization").unwrap_or("").to_string())
+            .collect()
+    }
+
+    const PATIENT: &str = r#"{"resourceType":"Patient","id":"p1"}"#;
+
+    #[test]
+    fn a_token_source_is_asked_per_request_and_renews_once_after_a_401() {
+        let (c, calls) = sourced(
+            vec![HttpResponse::new(401, ""), json(PATIENT), json(PATIENT)],
+            "token-b",
+        );
+        block_on(c.read("Patient", "p1")).unwrap();
+        block_on(c.read("Patient", "p1")).unwrap();
+        assert_eq!(
+            *calls.borrow(),
+            vec![None, Some("token-a".to_string()), None]
+        );
+        assert_eq!(
+            bearers(&c),
+            ["Bearer token-a", "Bearer token-b", "Bearer token-b"]
+        );
+    }
+
+    #[test]
+    fn a_401_the_source_cannot_renew_is_exit_3_after_one_request() {
+        let (c, calls) = sourced(vec![HttpResponse::new(401, "")], "token-a");
+        let err = block_on(c.read("Patient", "p1")).unwrap_err();
+        assert_eq!(
+            (err.exit_code(), err.reason()),
+            (3, Some(Reason::CredentialRefused))
+        );
+        assert_eq!(c.transport().seen.borrow().len(), 1);
+        assert_eq!(calls.borrow().len(), 2);
+
+        // A renewed token refused too: no second renewal, no loop.
+        let (c, calls) = sourced(
+            vec![HttpResponse::new(401, ""), HttpResponse::new(401, "")],
+            "token-b",
+        );
+        assert_eq!(
+            block_on(c.read("Patient", "p1")).unwrap_err().exit_code(),
+            3
+        );
+        assert_eq!(c.transport().seen.borrow().len(), 2);
+        assert_eq!(calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn a_token_source_error_is_the_request_error_and_nothing_is_sent() {
+        let c = FhirClient::new(Canned::with(vec![json(PATIENT)]), BASE, "pk-test", "0")
+            .unwrap()
+            .bearer_with(|_| {
+                Err(CliError::Auth("not signed in".into()).because(Reason::NoCredential))
+            });
+        let err = block_on(c.read("Patient", "p1")).unwrap_err();
+        assert_eq!(err.reason(), Some(Reason::NoCredential));
+        assert!(c.transport().seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_fixed_bearer_is_not_renewed() {
+        let c = client(vec![HttpResponse::new(401, ""), json(PATIENT)]);
+        assert_eq!(
+            block_on(c.read("Patient", "p1")).unwrap_err().exit_code(),
+            3
+        );
+        assert_eq!(c.transport().seen.borrow().len(), 1);
+    }
+
+    #[test]
+    fn each_wait_is_reported_without_the_query() {
+        let lines: Rc<RefCell<Vec<String>>> = Rc::default();
+        let log = lines.clone();
+        let c = client(vec![
+            HttpResponse::new(429, "").header("retry-after", "2"),
+            HttpResponse::new(503, ""),
+            page(&obs("o1"), None),
+        ])
+        .on_retry(move |line| log.borrow_mut().push(line.to_string()));
+        block_on(c.search("Observation", &[("patient", "p1".into())])).unwrap();
+        assert_eq!(
+            *lines.borrow(),
+            [
+                "the FHIR server at https://fhir.example.test answered HTTP 429 for Observation; asking again in 2 s (2 of 3)",
+                "the FHIR server at https://fhir.example.test answered HTTP 503 for Observation; asking again in 2 s (3 of 3)",
+            ]
+        );
+
+        let log = lines.clone();
+        lines.borrow_mut().clear();
+        let flaky = FhirClient::new(
+            Flaky {
+                failures: RefCell::new(1),
+                sent: RefCell::new(0),
+            },
+            BASE,
+            "pk-test",
+            "0",
+        )
+        .unwrap()
+        .sleeper(|_| {})
+        .on_retry(move |line| log.borrow_mut().push(line.to_string()));
+        block_on(flaky.read("Patient", "p1")).unwrap();
+        assert_eq!(
+            *lines.borrow(),
+            ["could not reach the FHIR server at https://fhir.example.test for Patient; asking again in 1 s (2 of 3)"]
+        );
+    }
+
+    #[test]
+    fn an_entry_that_does_not_read_costs_only_itself() {
+        let entries = [
+            obs("o1"),
+            r#"{"resource":{"id":"111111111"}}"#.to_string(),
+            r#"{"resource":["Observation"]}"#.to_string(),
+            obs("o2"),
+        ]
+        .join(",");
+        let c = client(vec![page(&entries, None)]);
+        let r = block_on(c.search("Observation", &[])).unwrap();
+        let ids: Vec<_> = r.resources.iter().map(|r| r.id.clone()).collect();
+        assert_eq!(ids, ["o1", "o2"]);
+        assert_eq!(r.unreadable.len(), 2, "{:?}", r.unreadable);
+        assert!(r.unreadable.iter().all(|why| !why.contains("111111111")));
     }
 }

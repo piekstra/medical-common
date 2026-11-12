@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- `pk-med-fhir`: `FhirClient::bearer_with`, a token source called before
+  each request and once more after a 401 to renew; `FhirClient::on_retry`,
+  told of each wait before a retry in one line with no query, id or token;
+  `UNREACHABLE`, the reason on an error for a request that got no HTTP
+  answer after its retries. One entry whose resource does not read no
+  longer fails its page: `RawEntry::unreadable` says why, and
+  `SearchResult::unreadable` lists them. `SearchResult` and `RawEntry` gain
+  a public field each.
+
 ## v0.1.0 — 2026-11-12
 
 First release. Pins cli-common v0.31.0.
