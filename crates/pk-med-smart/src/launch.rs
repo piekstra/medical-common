@@ -4,10 +4,10 @@
 use std::time::Duration;
 
 use pk_cli_auth::oauth::{
-    AuthorizationCodeFlow, ClientAuth, OAuthClient, PendingAuthorization, TokenSet,
+    random_token, AuthorizationCodeFlow, ClientAuth, OAuthClient, PendingAuthorization, TokenSet,
 };
 use pk_cli_core::transport::Transport;
-use pk_cli_core::CliError;
+use pk_cli_core::{CliError, Reason};
 use pk_cli_secrets::Secret;
 use serde_json::Map;
 
@@ -42,7 +42,10 @@ pub struct LaunchRequest<'a> {
 }
 
 /// Bind the loopback listener and build the address to open. Nothing has been
-/// sent anywhere yet: print [`SmartSignIn::url`] and open it.
+/// sent anywhere yet: print [`SmartSignIn::url`] and open it. When the scope
+/// asks for `openid`, the address carries a fresh `nonce` that
+/// [`SmartSignIn::exchange`] checks against the ID token
+/// ([`VendorQuirks::send_nonce`]).
 pub fn begin(app: &SmartApp, request: LaunchRequest<'_>) -> Result<SmartSignIn, CliError> {
     let config = request.config;
     if !config.supports_s256() {
@@ -68,6 +71,14 @@ pub fn begin(app: &SmartApp, request: LaunchRequest<'_>) -> Result<SmartSignIn, 
     for (name, value) in request.quirks.authorize_params() {
         flow = flow.param(name, value);
     }
+    let nonce = if request.quirks.send_nonce() && scope.split(' ').any(|s| s == "openid") {
+        Some(Secret::new(random_token(32)?))
+    } else {
+        None
+    };
+    if let Some(nonce) = &nonce {
+        flow = flow.param("nonce", nonce.expose());
+    }
     if let Some(issuer) = &config.issuer {
         flow = flow.issuer(issuer);
     }
@@ -76,6 +87,7 @@ pub fn begin(app: &SmartApp, request: LaunchRequest<'_>) -> Result<SmartSignIn, 
         config: config.clone(),
         fhir_base: request.fhir_base.trim_end_matches('/').to_string(),
         scope,
+        nonce,
     })
 }
 
@@ -85,6 +97,8 @@ pub struct SmartSignIn {
     config: SmartConfiguration,
     fhir_base: String,
     scope: String,
+    /// Sent with the authorization; the ID token must carry it.
+    nonce: Option<Secret>,
 }
 
 impl SmartSignIn {
@@ -108,6 +122,11 @@ impl SmartSignIn {
         self.pending.redirect_uri()
     }
 
+    /// Whether the authorization carries a `nonce` that the exchange checks.
+    pub fn nonce_checked(&self) -> bool {
+        self.nonce.is_some()
+    }
+
     /// Wait for the code, calling `on_refused` with each stray answer the
     /// listener refuses while it waits (print it on stderr).
     pub fn wait_for_code(
@@ -120,7 +139,10 @@ impl SmartSignIn {
 
     /// Exchange the code for tokens and build the session, for organization
     /// `organization`. `now` is Unix seconds. The session is not stored: do
-    /// that under `RefreshLock::store_signin`.
+    /// that under `RefreshLock::store_signin`. When a `nonce` was sent, an ID
+    /// token without it, or with another, is refused (exit 3): it answers
+    /// some other sign-in. The ID token is otherwise read unverified, for
+    /// display only.
     pub async fn exchange<T: Transport>(
         &self,
         oauth: &OAuthClient<T>,
@@ -136,6 +158,17 @@ impl SmartSignIn {
                 &self.pending.token_request(code),
             )
             .await?;
+        if let (Some(sent), Some(id_token)) = (&self.nonce, &response.id_token) {
+            let carried = pk_cli_auth::token::claims(id_token.expose())
+                .and_then(|c| c.get("nonce").and_then(|n| n.as_str().map(str::to_string)));
+            if carried.as_deref() != Some(sent.expose()) {
+                return Err(CliError::Auth(
+                    "the ID token does not carry this sign-in's nonce; refusing it. Sign in again"
+                        .into(),
+                )
+                .because(Reason::CredentialRefused));
+            }
+        }
         let context = LaunchContext::from_response(&response);
         let tokens = TokenSet::from_response(response, now, None);
         Ok(SmartSession {

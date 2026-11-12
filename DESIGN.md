@@ -424,7 +424,9 @@ or more resources of every type above, a Binary carrying a one-page PDF,
 and paging. It answers SMART discovery (both forms), the authorize step
 (PKCE S256 required, `state` and `iss` returned, a declined consent on
 request), the token endpoint (authorization code with the verifier checked,
-rotating refresh, JWT bearer) and registration. `Fault` makes chosen
+rotating refresh, JWT bearer, an ID token for `openid` carrying the
+authorization's `nonce`; `id_token_nonce_next` gives the next one another
+or none) and registration. `Fault` makes chosen
 requests fail: a 429 with `Retry-After`, an OperationOutcome error, a 401,
 a 503. Every value in it is synthetic: `crates/pk-med-fhir/fixtures/README.md`
 lists the dummy shapes, and a test checks them positively.
@@ -463,7 +465,9 @@ redirect, RFC 9207 `iss`, the token and registration endpoints) and its
    the first free registered port (none registered: any port) and builds the
    URL: PKCE S256 (a server that lists methods without S256 is refused),
    `state`, the scopes, and `aud`, which is the FHIR base with no trailing
-   `/`, or `aud` when the server spells it differently. When discovery named
+   `/`, or `aud` when the server spells it differently. When the scopes ask
+   for `openid`, it adds a fresh `nonce` (32 random bytes, base64url;
+   athenahealth requires one with `openid`). When discovery named
    an issuer, an answer whose `iss` differs is refused (exit 3). An answer
    without `iss` passes (cli-common v0.31.1 has no way to require it), and
    the `/metadata` fallback names no issuer at all, so there the RFC 9207
@@ -471,7 +475,11 @@ redirect, RFC 9207 `iss`, the token and registration endpoints) and its
    and the session keeps the issuer it was bound to.
 4. **Exchange.** `SmartSignIn::wait_for_code(timeout, on_refused)`, then
    `exchange(oauth, client, code, organization, now)` returns a
-   `SmartSession`. The client is public (`ClientAuth::Public`) or
+   `SmartSession`. When a `nonce` was sent, an ID token that does not carry
+   it, or carries another, is refused (exit 3, `CredentialRefused`), as
+   OpenID Connect Core §3.1.3.7 requires: it answers some other sign-in.
+   `SmartSignIn::nonce_checked()` says whether the check runs. The client
+   is public (`ClientAuth::Public`) or
    confidential: `ClientAuth::SecretBasic` with the secret the CLI reads
    from its keychain (Kaiser's claims API), never from argv.
 5. **Store.** Call `RefreshLock::before_signin` before step 3 and store the
@@ -608,6 +616,7 @@ Every method defaults to SMART as written (`NoQuirks`).
 | `scopes(requested)` | as requested | a server that refuses wildcards or spells scopes its own way |
 | `refresh_scope(session)` | the scope granted, else the scope asked for | a server that refuses a scope on refresh or on the JWT-bearer grant (`None`) |
 | `send_aud` | `true` | a server that refuses `aud` |
+| `send_nonce` | `true` | a server that refuses `nonce`; nothing is checked then |
 
 ### 3.6 Tests
 
