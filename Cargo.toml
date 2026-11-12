@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pk-med-fhir", "crates/pk-med-records"]
+members = ["crates/pk-med-fhir", "crates/pk-med-records", "crates/pk-med-smart"]
 
 [workspace.package]
 version = "0.1.0"
@@ -16,11 +16,13 @@ authors = ["piekstra"]
 # pin: two tags in one build are two copies of every pk-cli-core type.
 pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
 pk-cli-secrets = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
+pk-cli-auth = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
 pk-cli-http = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
 pk-med-fhir = { path = "crates/pk-med-fhir", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 # raw_value: a resource is kept as the server's own text (pk_med_fhir::raw).
 serde_json = { version = "1", features = ["raw_value", "preserve_order"] }
 base64 = "0.22"
+zeroize = "1"
 # The mock server's PKCE S256 check (feature test-util only).
 sha2 = "0.11"

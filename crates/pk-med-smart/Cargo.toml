@@ -1,0 +1,31 @@
+[package]
+name = "pk-med-smart"
+description = "SMART App Launch for a standalone patient app: discovery, scopes, the launch context, the token set in the keychain, renewal under a refresh lock, vendor quirks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+pk-cli-core = { workspace = true }
+pk-cli-auth = { workspace = true }
+pk-cli-secrets = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+zeroize = { workspace = true }
+# The `rsa` feature: an RS384 key for a dynamically registered client (Epic).
+# 0.10 is the release RUSTSEC-2023-0071 (Marvin) names as patched.
+rsa = { version = "0.10", optional = true, default-features = false, features = ["std", "encoding", "getrandom", "pkcs1v15"] }
+sha2 = { workspace = true, optional = true }
+getrandom = { version = "0.4", optional = true, features = ["sys_rng"] }
+
+[features]
+rsa = ["dep:rsa", "dep:sha2", "dep:getrandom"]
+
+[dev-dependencies]
+pk-cli-http = { workspace = true }
+pk-med-fhir = { workspace = true, features = ["test-util"] }

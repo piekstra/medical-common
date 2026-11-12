@@ -1,8 +1,8 @@
 # medical-common: the `health-records/v1` profile
 
-Status: v0.1.0 ships `pk-med-records` and `pk-med-fhir`. `pk-med-smart`
-(SMART App Launch) and `pk-med-dicom` (DICOM headers) follow in later
-versions.
+Status: v0.1.0 ships `pk-med-records` and `pk-med-fhir`; v0.2.0 adds
+`pk-med-smart` (SMART App Launch, §3). `pk-med-dicom` (DICOM headers)
+follows.
 
 This document is the specification of the profile, in the style of
 cli-common's domain profiles (`documents/v1`, `utility/v1`, cli-common
@@ -381,13 +381,147 @@ lists the dummy shapes, and a test checks them positively.
 `pk_med_records::test_util::write_synthetic_stream` writes that patient as
 a complete stream, for a store's tests.
 
-## 3. Consumption
+## 3. SMART App Launch (crate `pk-med-smart`)
+
+A standalone patient launch (SMART App Launch 2.x) for a CLI, built on
+cli-common's `pk_cli_auth::oauth` (PKCE S256, `state`, the loopback
+redirect, RFC 9207 `iss`, the token and registration endpoints) and its
+`RefreshLock`. No SMART or OAuth library of anyone else's.
+
+### 3.1 The sign-in (`auth login`)
+
+1. **Discovery.** `discover(transport, fhir_base, quirks, bin, version)`
+   reads `<base>/.well-known/smart-configuration`. On a 4xx (not 429), or a
+   document that does not read, it reads the `oauth-uris` extension of
+   `<base>/metadata` instead. A 429 or 5xx is exit 5 with no fallback: the
+   server said nothing about where to sign in. Every endpoint it returns must
+   be `https` (or `http` to the loopback, for the mock), else exit 5.
+2. **Scopes.** `ScopeSet::standalone_patient()` is `openid fhirUser
+   launch/patient offline_access`. Add `read_all(version)` (`patient/*.read`
+   or `patient/*.rs`) or `read_types(version, &[types])` for a server that
+   grants no wildcard. `ScopeVersion::for_server` picks v2 when the server
+   lists `permission-v2`, else v1. `ScopeSet::parse` takes a vendor's own
+   scope string as written.
+3. **Authorize.** `begin(&SmartApp, LaunchRequest)` binds the listener on
+   the first free registered port (none registered: any port) and builds the
+   URL: PKCE S256 (a server that lists methods without S256 is refused),
+   `state`, the scopes, and `aud`, which is the FHIR base, or `aud` when the
+   server spells it differently. When discovery named an issuer, an answer
+   whose `iss` differs is refused.
+4. **Exchange.** `SmartSignIn::wait_for_code(timeout, on_refused)`, then
+   `exchange(oauth, client, code, organization, now)` returns a
+   `SmartSession`. The client is public (`ClientAuth::Public`) or
+   confidential: `ClientAuth::SecretBasic` with the secret the CLI reads
+   from its keychain (Kaiser's claims API), never from argv.
+5. **Store.** Call `RefreshLock::before_signin` before step 3 and store the
+   session inside `RefreshLock::store_signin`, so a sign-in never races a
+   renewal.
+
+`LaunchContext` reads SMART's launch context: `patient`, `encounter` and
+`need_patient_banner` from the token response, and `fhirUser` from the
+token response or the ID token. The ID token is read unverified and only
+for display. The FHIR server, not this crate, decides access.
+
+### 3.2 `SmartSession`: one keychain item per sign-in
+
+One JSON item per (organization, patient), at account
+`smart/<organization>/<patient>` (`account()`; `_` for a sign-in with no
+patient in its context). This is the `session` a `PatientContext` names
+(§1.3). `SessionStore` is implemented for cli-common's `CredentialStore`
+(`get_json` / `set_json`); `MemoryStore` serves tests.
+
+| Field | |
+|---|---|
+| `organization`, `patient`, `fhir_user` | who the sign-in is for |
+| `fhir_base`, `issuer`, `token_endpoint` | where it was made; renewal reads these, not a fresh discovery |
+| `client_id` | the client the tokens were issued to |
+| `scope` | the scope asked for, sent again on a refresh |
+| `tokens` | cli-common's `TokenSet`: access and refresh tokens, `expires_at`, the ID token, the answer's other members |
+| `dynamic_client` | a client registered for this sign-in (§3.4) |
+| `extra` | a vendor's own state |
+
+`Debug` on a session, its token set or its client shows no token or key.
+
+### 3.3 Renewal
+
+`Renewer::new(store, lock, oauth, client, quirks)`:
+
+- `fresh(account, now)` returns the stored session. When its access token
+  expires within 60 s, it first renews it under the refresh lock: it reads
+  the item again, renews only if it is still due, and stores the result
+  before releasing the lock. Two processes never spend one refresh token.
+- `after_refusal(account, refused_access_token, now)` renews after a 401,
+  unless another process already replaced the refused token.
+- A refresh sends the stored scope (some servers narrow the grant without
+  it; `VendorQuirks::refresh_scope` can change that). A session from a
+  registered client renews with the JWT-bearer grant instead, and needs
+  `Renewer::signer`.
+
+| Condition | Exit | `Reason` |
+|---|---|---|
+| nothing stored at the account | 3 | `NoCredential` |
+| lapsed, and no refresh token or registered client | 3 | `CredentialRefused` |
+| the token endpoint refuses | as `pk_cli_auth::oauth::refusal` maps it (`invalid_grant` is 3, `CredentialRefused`) | |
+
+`fresh` is synchronous because the refresh lock is. The grant inside it
+runs on `pk_cli_core::block_on`, so call it before the command's own
+`block_on`, with a transport `block_on` can drive.
+
+### 3.4 Dynamic client registration (Epic)
+
+Epic's patient apps register a client per sign-in (RFC 7591) and get every
+later access token with a JWT the client signs (RFC 7523). There is no
+refresh token.
+
+1. Sign in as in §3.1.
+2. `register_dynamic_client(oauth, config, session, software_id, jwks,
+   signer, key, now)` posts the registration with the exchange's access
+   token as the initial access token. The metadata carries `software_id`
+   (Epic: the app's client id), the public JWK Set,
+   `token_endpoint_auth_method: private_key_jwt` and the JWT-bearer grant.
+   It then makes the first JWT-bearer grant, and returns the session with
+   `dynamic_client` set and the new tokens. Store it.
+3. Each assertion has `iss` = `sub` = the registered client id, `aud` = the
+   token endpoint, a random `jti`, and `exp` at most 5 minutes after `iat`.
+
+Signing goes through the `JwtSigner` trait (`alg`, `kid`, `sign`), so the
+crate holds no key type by default. Feature `rsa` adds `RsaKey`: it
+generates an RS384 key of at least 2048 bits from the system's random
+source (Epic documents 2048), and provides `jwks()` (the public half only),
+`kid()` (the RFC 7638 thumbprint), and `to_pkcs8()` / `from_pkcs8()` for
+the keychain form that `DynamicClient` keeps. It uses `rsa` 0.10, the
+release that RUSTSEC-2023-0071 (Marvin) names as patched.
+
+### 3.5 Vendor quirks
+
+`VendorQuirks` collects a vendor's departures from the specification.
+Every method defaults to SMART as written (`NoQuirks`).
+
+| Method | Default | For |
+|---|---|---|
+| `discovery_headers` | none | Epic's `Epic-Client-ID` on discovery |
+| `metadata_first` | `false` | a server whose `/metadata` is the reliable document |
+| `authorize_params` | none | a tenant or practice selector |
+| `scopes(requested)` | as requested | a server that refuses wildcards or spells scopes its own way |
+| `refresh_scope(session)` | the stored scope | a server that refuses a scope on refresh |
+| `send_aud` | `true` | a server that refuses `aud` |
+
+### 3.6 Tests
+
+The sign-in, renewal and registration are tested against §2.3's mock
+server over the real HTTP transport, with a `MemoryStore`. A CLI's own
+tests give `CredentialStore` an empty service from its
+`<PREFIX>_KEYCHAIN_SERVICE` test override, so nothing reads the real
+keychain.
+
+## 4. Consumption
 
 Pin a tag, never a branch or a path:
 
 ```toml
-pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.1.0" }
-pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.1.0" }
+pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.2.0" }
+pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.2.0" }
+pk-med-smart = { git = "https://github.com/piekstra/medical-common", tag = "v0.2.0" }   # features = ["rsa"] for §3.4
 ```
 
 Each medical-common tag pins one cli-common tag for every `pk-cli-*` crate,
@@ -398,3 +532,4 @@ does not convert to the other.
 | medical-common | cli-common |
 |---|---|
 | v0.1.0 | v0.31.0 |
+| v0.2.0 | v0.31.0 |

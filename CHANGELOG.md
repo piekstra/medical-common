@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.2.0 — 2026-11-12
+
+Pins cli-common v0.31.0, as v0.1.0 does.
+
+- `pk-med-smart`: SMART App Launch (DESIGN.md §3). `discover` (the
+  well-known document, falling back to `/metadata` on a 4xx; https
+  endpoints only); `ScopeSet` and `ScopeVersion` (v1 and v2, explicit
+  per-type scopes, a vendor's own string); `begin` / `SmartSignIn` (PKCE
+  S256, `aud`, registered ports, the issuer checked) and `exchange` for
+  public and `client_secret_basic` clients; `LaunchContext`;
+  `SmartSession`, one keychain item per organization and patient at
+  `smart/<org>/<patient>`, through `SessionStore` (`CredentialStore`,
+  `MemoryStore`); `Renewer::fresh` and `after_refusal` under
+  `RefreshLock`, sending the stored scope; `register_dynamic_client` and
+  `jwt_bearer_tokens` with `JwtSigner` and `signed_assertion` (Epic);
+  `VendorQuirks`. Feature `rsa`: `RsaKey`, an RS384 key (rsa 0.10).
+
 ## v0.1.0 — 2026-11-12
 
 First release. Pins cli-common v0.31.0.
