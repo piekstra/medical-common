@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.4.2 — 2026-11-12
+
+Pins cli-common v0.31.1, as v0.4.1 does.
+
+- `pk-med-smart`: `MemoryStore` is `Send + Sync`, as `CredentialStore` is,
+  so a test can put it behind a `FhirClient::bearer_with` source (its map
+  is behind a `Mutex`, not a `RefCell`). It keeps each item as a `Secret`,
+  zeroized when replaced or dropped.
+
 ## v0.4.1 — 2026-11-12
 
 Pins cli-common v0.31.1, as v0.4.0 does. Additions only.

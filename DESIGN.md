@@ -3,7 +3,8 @@
 Status: v0.1.0 ships `pk-med-records` and `pk-med-fhir`; v0.2.0 adds
 `pk-med-smart` (SMART App Launch, §3); v0.3.0 adds `pk-med-dicom` (DICOM
 headers, §4); v0.4.0 adds the OpenID nonce (§3.1) and a vendor's retry
-guidance (§2.2); v0.4.1 adds `search_pages` (§2.2).
+guidance (§2.2); v0.4.1 adds `search_pages` (§2.2); v0.4.2 makes
+`MemoryStore` `Sync` (§3.2).
 
 This document is the specification of the profile, in the style of
 cli-common's domain profiles (`documents/v1`, `utility/v1`, cli-common
@@ -521,7 +522,8 @@ patient in its context). Each part has `%` and `/` percent-encoded
 has neither character. This is the `session` a `PatientContext` names
 (§1.3). `SessionStore` is implemented for cli-common's `CredentialStore`
 (the item read and written as text, decoded here); `MemoryStore` serves
-tests. An item that does not read is an error naming a line and a column,
+tests. Both are `Send + Sync`, so either can sit behind a
+`FhirClient::bearer_with` source. An item that does not read is an error naming a line and a column,
 never a value, and a keychain error shows the account as
 `smart/<organization>/…`, never the patient's id.
 
@@ -824,10 +826,10 @@ them at run time.
 Pin a tag, never a branch or a path:
 
 ```toml
-pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.1" }
-pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.1" }
-pk-med-smart = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.1" }   # features = ["rsa"] for §3.4
-pk-med-dicom = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.1" }   # features = ["test-util"] for §4.6
+pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.2" }
+pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.2" }
+pk-med-smart = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.2" }   # features = ["rsa"] for §3.4
+pk-med-dicom = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.2" }   # features = ["test-util"] for §4.6
 ```
 
 Each medical-common tag pins one cli-common tag for every `pk-cli-*` crate,
@@ -842,3 +844,4 @@ does not convert to the other.
 | v0.3.0 | v0.31.1 |
 | v0.4.0 | v0.31.1 |
 | v0.4.1 | v0.31.1 |
+| v0.4.2 | v0.31.1 |
