@@ -29,7 +29,8 @@ fn pull(mock: &MockServer, out: &mut Vec<u8>) -> pk_med_records::Trailer {
         if resource_type == "Binary" {
             continue;
         }
-        let search = format!("{resource_type}?patient={PATIENT_ID}");
+        // A skip names the search, never the patient it was for.
+        let search = format!("{resource_type}?patient");
         match block_on(client.search(resource_type, &[("patient", PATIENT_ID.into())])) {
             Ok(page) => {
                 for resource in &page.resources {
@@ -65,15 +66,11 @@ fn pull(mock: &MockServer, out: &mut Vec<u8>) -> pk_med_records::Trailer {
                 } else {
                     skip::UNSUPPORTED
                 };
-                writer.skip(Skip::search(
-                    format!("{resource_type}?patient=…"),
-                    code,
-                    e.message().to_string(),
-                ));
+                writer.skip(Skip::search(search.clone(), code, e.message().to_string()));
             }
         }
     }
-    writer.finish("2020-01-03T00:01:00Z", None).unwrap()
+    writer.finish("2020-01-03T00:01:00Z", None).unwrap().trailer
 }
 
 #[test]

@@ -222,6 +222,9 @@ impl<T: Transport> FhirClient<T> {
                 break;
             };
             if next == url {
+                // The server named a next page and it is this one: stop, and
+                // say pages may be missing rather than loop.
+                result.truncated = true;
                 break;
             }
             if result.pages >= self.page_cap {
@@ -297,9 +300,18 @@ impl<T: Transport> FhirClient<T> {
                     self.origin
                 )));
             }
+            let path = reference
+                .split_once("://")
+                .and_then(|(_, rest)| rest.find('/').map(|i| &rest[i..]))
+                .unwrap_or_default();
+            if has_dot_segment(path) {
+                return Err(CliError::Usage(
+                    "a FHIR reference may not climb with `.` or `..`".into(),
+                ));
+            }
             return Ok(reference.to_string());
         }
-        if reference.is_empty() || reference.starts_with(['#', '/']) || reference.contains("..") {
+        if reference.is_empty() || reference.starts_with(['#', '/']) || has_dot_segment(reference) {
             return Err(CliError::Usage(
                 "a FHIR path must be relative to the base, as `Binary/<id>`".into(),
             ));
@@ -354,7 +366,17 @@ impl<T: Transport> FhirClient<T> {
             if let Some(token) = &self.bearer {
                 request = request.header("Authorization", format!("Bearer {}", token.expose()));
             }
-            let response = self.transport.send(request).await?;
+            let response = match self.transport.send(request).await {
+                Ok(response) => response,
+                // A connection that failed (exit 5) is asked again like a 5xx;
+                // a refusal before sending (exit 2: an insecure URL) is not.
+                Err(e) if e.exit_code() == 5 && attempt < self.retry.attempts => {
+                    (self.sleeper)(self.retry.delay * 2u32.saturating_pow(attempt - 1));
+                    attempt += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             if response.is_success() {
                 return Ok(response);
             }
@@ -422,8 +444,22 @@ fn check_type(resource_type: &str) -> Result<(), CliError> {
 }
 
 /// FHIR's `id`: 1 to 64 of `A-Z a-z 0-9 - .`.
+/// Whether a path's segments, before its query, include `.` or `..`, spelled
+/// out or percent-encoded (`%2e%2e`): a URL parser resolves both.
+fn has_dot_segment(path: &str) -> bool {
+    path.split(['?', '#'])
+        .next()
+        .unwrap_or_default()
+        .split('/')
+        .any(|segment| {
+            let decoded = segment.replace("%2e", ".").replace("%2E", ".");
+            decoded == "." || decoded == ".."
+        })
+}
+
 fn check_id(id: &str) -> Result<(), CliError> {
     let ok = (1..=64).contains(&id.len())
+        && !id.chars().all(|c| c == '.')
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
@@ -446,6 +482,7 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pk_cli_core::{block_on, Reason};
     use std::cell::RefCell;
     use std::collections::VecDeque;
 
@@ -657,5 +694,105 @@ mod tests {
     fn debug_shows_no_token() {
         let c = client(vec![]);
         assert!(!format!("{c:?}").contains("synthetic-token"));
+    }
+
+    #[test]
+    fn a_dot_segment_is_refused_however_it_is_spelled() {
+        let c = client(vec![]);
+        for path in [
+            "../admin",
+            "%2e%2e/%2e%2e/admin/x",
+            "Patient/%2E/x",
+            "https://fhir.example.test/r4/Patient/p1/Binary/..",
+        ] {
+            let err = block_on(c.get_raw(path)).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "{path}");
+        }
+        let err =
+            block_on(c.binary("https://fhir.example.test/r4/Patient/p1/Binary/..")).unwrap_err();
+        assert_eq!(err.exit_code(), 2);
+        for id in [".", ".."] {
+            assert_eq!(
+                block_on(c.read("Patient", id)).unwrap_err().exit_code(),
+                2,
+                "{id}"
+            );
+        }
+        assert!(c.transport().seen.borrow().is_empty(), "nothing was sent");
+        assert!(check_id("a..b").is_ok(), "dots inside an id are allowed");
+    }
+
+    #[test]
+    fn a_warning_never_changes_the_exit_code() {
+        let warning = |status: u16, code: &str| {
+            HttpResponse::new(
+                status,
+                format!(
+                    r#"{{"resourceType":"OperationOutcome","issue":[{{"severity":"warning","code":"{code}"}}]}}"#
+                ),
+            )
+            .header("content-type", "application/fhir+json")
+        };
+        let err =
+            block_on(client(vec![warning(400, "not-found")]).read("Patient", "p1")).unwrap_err();
+        assert_eq!(
+            (err.exit_code(), err.reason()),
+            (5, Some(Reason::BadRequest))
+        );
+        let err =
+            block_on(client(vec![warning(404, "suppressed")]).read("Patient", "p1")).unwrap_err();
+        assert_eq!(err.exit_code(), 4);
+    }
+
+    #[test]
+    fn a_next_link_to_the_same_page_ends_the_search_as_truncated() {
+        let same = format!("{BASE}/Observation?patient=p");
+        let c = client(vec![page(&obs("o1"), Some(&same))]);
+        let r = block_on(c.search("Observation", &[("patient", "p".into())])).unwrap();
+        assert_eq!((r.resources.len(), r.pages, r.truncated), (1, 1, true));
+    }
+
+    /// Fails to connect once, then answers.
+    struct Flaky {
+        failures: RefCell<u32>,
+        sent: RefCell<u32>,
+    }
+
+    impl Transport for Flaky {
+        async fn send(&self, _: HttpRequest) -> Result<HttpResponse, CliError> {
+            *self.sent.borrow_mut() += 1;
+            let mut failures = self.failures.borrow_mut();
+            if *failures > 0 {
+                *failures -= 1;
+                return Err(CliError::Upstream("connection reset".into()));
+            }
+            Ok(json(r#"{"resourceType":"Patient","id":"p1"}"#))
+        }
+    }
+
+    #[test]
+    fn a_failed_connection_is_asked_again_within_the_policy() {
+        let flaky = |failures| {
+            FhirClient::new(
+                Flaky {
+                    failures: RefCell::new(failures),
+                    sent: RefCell::new(0),
+                },
+                BASE,
+                "pk-test",
+                "0",
+            )
+            .unwrap()
+            .sleeper(|_| {})
+        };
+        let c = flaky(2);
+        assert!(block_on(c.read("Patient", "p1")).is_ok());
+        assert_eq!(*c.transport().sent.borrow(), 3);
+        let c = flaky(3);
+        assert_eq!(
+            block_on(c.read("Patient", "p1")).unwrap_err().exit_code(),
+            5
+        );
+        assert_eq!(*c.transport().sent.borrow(), 3, "3 requests at most");
     }
 }

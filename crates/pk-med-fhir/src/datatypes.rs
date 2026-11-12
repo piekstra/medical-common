@@ -19,7 +19,7 @@ pub struct Meta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub profile: Vec<String>,
+    pub profile: Vec<Option<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub security: Vec<Coding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -222,11 +222,11 @@ pub struct HumanName {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub given: Vec<String>,
+    pub given: Vec<Option<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub prefix: Vec<String>,
+    pub prefix: Vec<Option<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub suffix: Vec<String>,
+    pub suffix: Vec<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub period: Option<Period>,
     /// Every element this type does not name: extensions, `_` primitive
@@ -266,7 +266,7 @@ pub struct Address {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub line: Vec<String>,
+    pub line: Vec<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub city: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

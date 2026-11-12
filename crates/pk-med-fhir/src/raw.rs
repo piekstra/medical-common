@@ -53,8 +53,17 @@ impl RawResource {
     /// Read one resource from JSON text. Text that is not a JSON object with a
     /// string `resourceType` is [`CliError::Upstream`]: a server sent it.
     pub fn parse(text: &str) -> Result<Self, CliError> {
-        let peek: Peek = serde_json::from_str(text)
-            .map_err(|e| CliError::Upstream(format!("a FHIR resource is not JSON: {e}")))?;
+        if !text.trim_start().starts_with('{') {
+            return Err(CliError::Upstream(
+                "a FHIR resource is not a JSON object".into(),
+            ));
+        }
+        let peek: Peek = serde_json::from_str(text).map_err(|e| {
+            CliError::Upstream(format!(
+                "a FHIR resource did not read: it {}",
+                crate::describe_json_error(&e)
+            ))
+        })?;
         let resource_type = peek
             .resource_type
             .filter(|t| !t.is_empty())
@@ -86,8 +95,13 @@ impl RawResource {
 
     /// The resource as a JSON value (numbers in `serde_json`'s spelling).
     pub fn value(&self) -> Result<Value, CliError> {
-        serde_json::from_str(&self.raw)
-            .map_err(|e| CliError::Upstream(format!("a FHIR resource is not JSON: {e}")))
+        serde_json::from_str(&self.raw).map_err(|e| {
+            CliError::Upstream(format!(
+                "a FHIR {} did not read: it {}",
+                self.resource_type,
+                crate::describe_json_error(&e)
+            ))
+        })
     }
 
     /// The resource as one of this crate's types, refusing another
@@ -218,8 +232,17 @@ struct EntryWire<'a> {
 impl RawBundle {
     /// Read a Bundle from JSON text. Anything else is [`CliError::Upstream`].
     pub fn parse(text: &str) -> Result<Self, CliError> {
-        let wire: BundleWire = serde_json::from_str(text)
-            .map_err(|e| CliError::Upstream(format!("a FHIR Bundle did not read: {e}")))?;
+        if !text.trim_start().starts_with('{') {
+            return Err(CliError::Upstream(
+                "a FHIR Bundle is not a JSON object".into(),
+            ));
+        }
+        let wire: BundleWire = serde_json::from_str(text).map_err(|e| {
+            CliError::Upstream(format!(
+                "a FHIR Bundle did not read: it {}",
+                crate::describe_json_error(&e)
+            ))
+        })?;
         match wire.resource_type.as_deref() {
             Some("Bundle") => {}
             Some(other) => {
@@ -297,13 +320,27 @@ mod tests {
 
     #[test]
     fn text_that_is_not_a_resource_is_upstream() {
-        for text in ["[]", "{}", r#"{"resourceType":""}"#, "nope"] {
+        for text in [
+            "[]",
+            "{}",
+            r#"{"resourceType":""}"#,
+            "nope",
+            r#"["Observation","o1"]"#,
+        ] {
             assert_eq!(
                 RawResource::parse(text).unwrap_err().exit_code(),
                 5,
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn an_error_names_no_value() {
+        let err = RawResource::parse(r#"{"resourceType":"Patient","id":111111111}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("111111111"), "{err}");
     }
 
     #[test]

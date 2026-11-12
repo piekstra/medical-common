@@ -674,7 +674,7 @@ pub struct AllergyIntolerance {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "type")]
     pub type_: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub category: Vec<String>,
+    pub category: Vec<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub criticality: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1533,13 +1533,13 @@ pub struct EobItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub care_team_sequence: Vec<u32>,
+    pub care_team_sequence: Vec<Option<u32>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub diagnosis_sequence: Vec<u32>,
+    pub diagnosis_sequence: Vec<Option<u32>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub procedure_sequence: Vec<u32>,
+    pub procedure_sequence: Vec<Option<u32>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub note_number: Vec<u32>,
+    pub note_number: Vec<Option<u32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revenue: Option<CodeableConcept>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1817,7 +1817,7 @@ pub struct Organization {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub alias: Vec<String>,
+    pub alias: Vec<Option<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub telecom: Vec<ContactPoint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2105,9 +2105,9 @@ pub struct OperationOutcomeIssue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostics: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub location: Vec<String>,
+    pub location: Vec<Option<String>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub expression: Vec<String>,
+    pub expression: Vec<Option<String>>,
     /// Every element this type does not name: extensions, `_` primitive
     /// extensions, choice types and elements not typed here.
     #[serde(flatten)]
