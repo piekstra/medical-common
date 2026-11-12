@@ -48,6 +48,14 @@ pub trait VendorQuirks {
     fn send_aud(&self) -> bool {
         true
     }
+
+    /// Whether a `nonce` goes on the authorization request when `openid` is
+    /// asked for, to be checked against the ID token (OpenID Connect Core
+    /// §3.1.2.1, §3.1.3.7). A server that refuses the parameter can turn it
+    /// off; nothing is checked then.
+    fn send_nonce(&self) -> bool {
+        true
+    }
 }
 
 /// SMART as the specification writes it.

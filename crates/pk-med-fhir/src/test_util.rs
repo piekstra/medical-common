@@ -241,6 +241,7 @@ struct Grant {
     redirect_uri: String,
     client_id: String,
     scope: String,
+    nonce: Option<String>,
 }
 
 #[derive(Default)]
@@ -253,6 +254,9 @@ struct State {
     requests: Vec<Recorded>,
     page_size: usize,
     deny_next: bool,
+    /// The `nonce` the next code's ID token carries instead of the one asked
+    /// for: `Some(None)` for none.
+    nonce_next: Option<Option<String>>,
 }
 
 /// The mock server. It stops when dropped.
@@ -328,6 +332,13 @@ impl MockServer {
     /// person declines.
     pub fn deny_next_authorization(&self) {
         self.state.lock().unwrap().deny_next = true;
+    }
+
+    /// Give the next code's ID token `nonce` (none for `None`) instead of
+    /// the one the authorization asked for, as a server that mixes up two
+    /// sign-ins or ignores the parameter would.
+    pub fn id_token_nonce_next(&self, nonce: Option<&str>) {
+        self.state.lock().unwrap().nonce_next = Some(nonce.map(str::to_string));
     }
 
     /// Every request so far.
@@ -592,6 +603,10 @@ fn authorize(params: &[(String, String)], state: &Mutex<State>, base: &str) -> A
     }
     state.issued += 1;
     let code = format!("synthetic-code-{}", state.issued);
+    let nonce = match state.nonce_next.take() {
+        Some(instead) => instead,
+        None => one(params, "nonce").map(str::to_string),
+    };
     state.codes.insert(
         code.clone(),
         Grant {
@@ -601,6 +616,7 @@ fn authorize(params: &[(String, String)], state: &Mutex<State>, base: &str) -> A
             redirect_uri: redirect.to_string(),
             client_id: client_id.to_string(),
             scope: one(params, "scope").unwrap_or_default().to_string(),
+            nonce,
         },
     );
     back(format!("code={code}"))
@@ -637,7 +653,14 @@ fn token(request: &Recorded, state: &Mutex<State>, base: &str) -> Answer {
             {
                 return Answer::oauth_error(400, "invalid_grant");
             }
-            issue(&mut state, &grant.scope, &client_id, base, true)
+            issue(
+                &mut state,
+                &grant.scope,
+                &client_id,
+                base,
+                true,
+                grant.nonce.as_deref(),
+            )
         }
         Some("refresh_token") => {
             let Some(scope) = one(&form, "refresh_token").and_then(|r| state.refresh.remove(r))
@@ -645,7 +668,7 @@ fn token(request: &Recorded, state: &Mutex<State>, base: &str) -> Answer {
                 return Answer::oauth_error(400, "invalid_grant");
             };
             let scope = one(&form, "scope").map_or(scope, str::to_string);
-            issue(&mut state, &scope, &client_id, base, true)
+            issue(&mut state, &scope, &client_id, base, true, None)
         }
         Some("urn:ietf:params:oauth:grant-type:jwt-bearer") => {
             let issuer = one(&form, "assertion")
@@ -666,13 +689,20 @@ fn token(request: &Recorded, state: &Mutex<State>, base: &str) -> Answer {
                 return Answer::oauth_error(400, "invalid_client");
             }
             let scope = one(&form, "scope").unwrap_or("patient/*.read").to_string();
-            issue(&mut state, &scope, DYNAMIC_CLIENT_ID, base, false)
+            issue(&mut state, &scope, DYNAMIC_CLIENT_ID, base, false, None)
         }
         _ => Answer::oauth_error(400, "unsupported_grant_type"),
     }
 }
 
-fn issue(state: &mut State, scope: &str, client_id: &str, base: &str, refresh: bool) -> Answer {
+fn issue(
+    state: &mut State,
+    scope: &str,
+    client_id: &str,
+    base: &str,
+    refresh: bool,
+    nonce: Option<&str>,
+) -> Answer {
     state.issued += 1;
     let n = state.issued;
     let access = format!("synthetic-access-{n}");
@@ -692,28 +722,32 @@ fn issue(state: &mut State, scope: &str, client_id: &str, base: &str, refresh: b
         body["refresh_token"] = refresh_token.into();
     }
     if scope.split(' ').any(|s| s == "openid") {
-        body["id_token"] = id_token(base, client_id).into();
+        body["id_token"] = id_token(base, client_id, nonce).into();
     }
     Answer::json(200, body.to_string())
 }
 
 /// An unsigned id_token naming the synthetic patient, built here rather than
-/// kept in a fixture.
-fn id_token(base: &str, client_id: &str) -> String {
+/// kept in a fixture, with the authorization's `nonce` when it sent one.
+fn id_token(base: &str, client_id: &str, nonce: Option<&str>) -> String {
     let part = |v: Value| {
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string().as_bytes())
     };
+    let mut claims = json!({
+        "iss": base,
+        "sub": PATIENT_ID,
+        "aud": client_id,
+        "fhirUser": format!("{base}/Patient/{PATIENT_ID}"),
+        "iat": 0,
+        "exp": 0,
+    });
+    if let Some(nonce) = nonce {
+        claims["nonce"] = nonce.into();
+    }
     format!(
         "{}.{}.",
         part(json!({ "alg": "none", "typ": "JWT" })),
-        part(json!({
-            "iss": base,
-            "sub": PATIENT_ID,
-            "aud": client_id,
-            "fhirUser": format!("{base}/Patient/{PATIENT_ID}"),
-            "iat": 0,
-            "exp": 0,
-        }))
+        part(claims)
     )
 }
 

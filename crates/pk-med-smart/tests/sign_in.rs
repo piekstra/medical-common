@@ -606,6 +606,78 @@ fn a_renewer_for_another_client_sends_nothing() {
     assert_eq!(token_requests(&mock), before);
 }
 
+fn nonce_of(url: &str) -> Option<String> {
+    url.split(['?', '&'])
+        .find_map(|p| p.strip_prefix("nonce="))
+        .map(str::to_string)
+}
+
+/// Start a sign-in and take it as far as the code.
+fn code_for(sign_in: &SmartSignIn) -> Secret {
+    let browser = browse(sign_in.url());
+    let code = sign_in
+        .wait_for_code(Duration::from_secs(10), |reason| {
+            panic!("refused: {reason}")
+        })
+        .unwrap();
+    browser.join().unwrap();
+    code
+}
+
+#[test]
+fn an_openid_sign_in_sends_a_nonce_and_the_id_token_must_carry_it() {
+    let mock = MockServer::start();
+    let client = ClientAuth::public(CLIENT_ID);
+    let first = start(&mock, &client, &NoQuirks);
+    let second = start(&mock, &client, &NoQuirks);
+    assert!(first.nonce_checked());
+    let (a, b) = (
+        nonce_of(first.url()).unwrap(),
+        nonce_of(second.url()).unwrap(),
+    );
+    assert!(a.len() >= 43 && a != b, "a fresh nonce each time");
+    drop(second);
+    let code = code_for(&first);
+    let session = block_on(first.exchange(&oauth(), &client, &code, "org-0001", NOW)).unwrap();
+    assert!(session.tokens.id_token.is_some());
+
+    for carried in [Some("another-sign-ins-nonce"), None] {
+        let sign_in = start(&mock, &client, &NoQuirks);
+        mock.id_token_nonce_next(carried);
+        let code = code_for(&sign_in);
+        let err =
+            block_on(sign_in.exchange(&oauth(), &client, &code, "org-0001", NOW)).unwrap_err();
+        assert_eq!(
+            (err.exit_code(), err.reason()),
+            (3, Some(Reason::CredentialRefused)),
+            "{carried:?}"
+        );
+        let sent = nonce_of(sign_in.url()).unwrap();
+        assert!(
+            !err.to_string().contains(&sent),
+            "no nonce in the error: {err}"
+        );
+    }
+}
+
+struct NoNonce;
+impl VendorQuirks for NoNonce {
+    fn send_nonce(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_vendor_can_leave_the_nonce_out() {
+    let mock = MockServer::start();
+    let client = ClientAuth::public(CLIENT_ID);
+    let sign_in = start(&mock, &client, &NoNonce);
+    assert!(!sign_in.nonce_checked());
+    assert_eq!(nonce_of(sign_in.url()), None);
+    let code = code_for(&sign_in);
+    assert!(block_on(sign_in.exchange(&oauth(), &client, &code, "org-0001", NOW)).is_ok());
+}
+
 fn state_of(url: &str) -> String {
     url.split(['?', '&'])
         .find_map(|p| p.strip_prefix("state="))

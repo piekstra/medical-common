@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.4.0 — 2026-11-12
+
+Pins cli-common v0.31.1, as v0.3.0 does.
+
+- `pk-med-smart`: an OpenID sign-in sends a nonce (DESIGN.md §3.1). When
+  the scopes ask for `openid`, `begin` adds a fresh `nonce`, 32 random
+  bytes in base64url. `exchange` refuses an ID token that does not carry
+  it, or carries another (exit 3, `CredentialRefused`), as OpenID Connect
+  Core §3.1.3.7 requires. `SmartSignIn::nonce_checked()` says whether the
+  check runs. `VendorQuirks::send_nonce` (default `true`) turns it off for
+  a server that refuses the parameter. athenahealth requires a nonce with
+  `openid`.
+- `pk-med-fhir`: a vendor's retry guidance can be followed (DESIGN.md
+  §2.2). `RetryPolicy` gains:
+  - `server_errors(&[502, 503, 504])`: which 5xx are asked again (default:
+    every 5xx);
+  - `retry_after_required(true)`: a 429 is asked again only with a
+    `Retry-After` within `max_wait` (default `false`);
+  - `jitter(0.25)`: each wait lengthened by a random 0–25 %, never past
+    `max_wait` (default `0`);
+  - builder methods `attempts`, `delay` and `max_wait`.
+- **Breaking:** `RetryPolicy` is `#[non_exhaustive]`, so a struct literal
+  no longer compiles. Build it from `RetryPolicy::default()` or
+  `RetryPolicy::none()` with its methods. Its fields stay public to read
+  and assign.
+- `test-util`: the mock's ID token carries the authorization's `nonce`.
+  `MockServer::id_token_nonce_next` gives the next one another nonce, or
+  none.
+- `pk-med-dicom`: the doc comment on `DicomError::Limit` names
+  `MAX_INFLATED_BYTES`.
+
 ## v0.3.0 — 2026-11-12
 
 Pins cli-common v0.31.1, as v0.2.0 does.
