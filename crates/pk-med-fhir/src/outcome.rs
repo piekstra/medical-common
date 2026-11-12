@@ -14,12 +14,23 @@
 //! `forbidden`, `suppressed`, `security` 3 with `Forbidden`; `not-found`,
 //! `deleted` 4; `throttled`, `transient`, `timeout`, `exception` 5. Messages
 //! name the server's origin and the resource type, never a query, an id or a
-//! token, and quote the outcome's text cut to printable characters.
+//! token, and quote the outcome's text cut to printable characters. What to
+//! do next is the error's remedy ([`SIGN_IN_AGAIN`], [`TRY_AGAIN`]), which a
+//! CLI can replace with `CliError::with_remedy`.
 
 use pk_cli_core::transport::HttpResponse;
 use pk_cli_core::{CliError, Reason};
 
 use crate::resources::{OperationOutcome, OperationOutcomeIssue};
+
+/// The remedy on a refused credential (exit 3, `CredentialRefused`). It is
+/// the error's remedy, not part of its message, so a CLI replaces it with
+/// its own (`with_remedy("run auth login --org …")`) rather than add a
+/// second one.
+pub const SIGN_IN_AGAIN: &str = "sign in again";
+/// The remedy on an answer that says nothing (a 429, a 5xx, an edge's
+/// HTML 403, a transient OperationOutcome).
+pub const TRY_AGAIN: &str = "try again later";
 
 impl OperationOutcome {
     /// The first issue of severity `fatal` or `error`. A warning or an
@@ -85,7 +96,7 @@ pub fn status_error(what: &str, origin: &str, response: &HttpResponse, now: i64)
             .retry_after
             .map(|d| format!("; it asked to wait {} s", d.as_secs()))
             .unwrap_or_default();
-        return CliError::Upstream(format!("{said}{wait}. Try again later"));
+        return CliError::Upstream(format!("{said}{wait}")).with_remedy(TRY_AGAIN);
     }
     if let Some(code) = outcome
         .as_ref()
@@ -97,7 +108,9 @@ pub fn status_error(what: &str, origin: &str, response: &HttpResponse, now: i64)
         }
     }
     match status {
-        401 => CliError::Auth(format!("{said}. Sign in again")).because(Reason::CredentialRefused),
+        401 => CliError::Auth(said)
+            .because(Reason::CredentialRefused)
+            .with_remedy(SIGN_IN_AGAIN),
         403 => {
             CliError::Auth(format!("{said}: access to it was refused")).because(Reason::Forbidden)
         }
@@ -126,15 +139,15 @@ pub fn outcome_error(what: &str, origin: &str, outcome: &OperationOutcome) -> Op
 
 fn by_issue(code: &str, said: &str) -> Option<CliError> {
     Some(match code {
-        "login" | "unknown" | "expired" => {
-            CliError::Auth(format!("{said}. Sign in again")).because(Reason::CredentialRefused)
-        }
+        "login" | "unknown" | "expired" => CliError::Auth(said.to_string())
+            .because(Reason::CredentialRefused)
+            .with_remedy(SIGN_IN_AGAIN),
         "forbidden" | "suppressed" | "security" => {
             CliError::Auth(format!("{said}: access to it was refused")).because(Reason::Forbidden)
         }
         "not-found" | "deleted" => CliError::NotFound(said.to_string()),
         "throttled" | "transient" | "timeout" | "exception" => {
-            CliError::Upstream(format!("{said}. Try again later"))
+            CliError::Upstream(said.to_string()).with_remedy(TRY_AGAIN)
         }
         _ => return None,
     })
@@ -253,5 +266,35 @@ mod tests {
     fn server_text_is_printable_and_bounded() {
         assert_eq!(printable("a\u{1b}[31mb\nc"), "a [31mb c");
         assert_eq!(printable(&"x".repeat(300)).chars().count(), 201);
+    }
+
+    #[test]
+    fn a_cli_replaces_the_remedy_instead_of_adding_one() {
+        let err = status_error(
+            "Patient",
+            "https://fhir.example.test",
+            &HttpResponse::new(401, ""),
+            0,
+        );
+        assert_eq!(err.remedy(), Some(SIGN_IN_AGAIN));
+        assert_eq!(err.reason(), Some(Reason::CredentialRefused));
+        let mine = err.with_remedy("run auth login --org example");
+        let text = mine.to_string();
+        assert!(
+            text.ends_with("\u{2014} run auth login --org example"),
+            "{text}"
+        );
+        assert!(!text.to_lowercase().contains("sign in again"), "{text}");
+        assert_eq!(mine.exit_code(), 3);
+        assert_eq!(mine.reason(), Some(Reason::CredentialRefused));
+
+        let busy = status_error(
+            "Patient",
+            "https://fhir.example.test",
+            &HttpResponse::new(503, ""),
+            0,
+        );
+        assert_eq!(busy.remedy(), Some(TRY_AGAIN));
+        assert_eq!(busy.exit_code(), 5);
     }
 }

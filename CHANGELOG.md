@@ -2,7 +2,8 @@
 
 ## v0.2.0 — 2026-11-12
 
-Pins cli-common v0.31.0, as v0.1.0 does.
+Pins cli-common v0.31.1 for every `pk-cli-*` (`private_file` syncs before it
+renames). A consumer moves its own `pk-cli-*` to v0.31.1 in the same change.
 
 - `pk-med-smart`: SMART App Launch (DESIGN.md §3).
   - `discover`: the well-known document, falling back to `/metadata` on a
@@ -38,7 +39,18 @@ Pins cli-common v0.31.0, as v0.1.0 does.
   longer fails its page: `RawEntry::unreadable` says why, and
   `SearchResult::unreadable` lists them. `SearchResult` and `RawEntry` gain
   a public field each.
-
+- `pk-med-fhir`: "sign in again" and "try again later" are the error's
+  remedy (`outcome::SIGN_IN_AGAIN`, `outcome::TRY_AGAIN`), no longer part
+  of its message, so a CLI replaces them with its own.
+- `pk-med-records`: `create_export_file` returns an `ExportFile`. The
+  stream is written beside `records.ndjson`. `ExportFile::commit(&finished)`
+  syncs, renames and syncs the directory: a complete stream replaces
+  `records.ndjson`, and an incomplete one goes to
+  `records.incomplete.ndjson` (`INCOMPLETE_FILE`), keeping the last
+  complete export. Dropped uncommitted, the file is removed, and a killed
+  run's file is removed by the next export (each export locks its own).
+  Breaking: it returned `(PathBuf, File)`, and renamed the empty file into
+  place before anything was written.
 
 ## v0.1.0 — 2026-11-12
 

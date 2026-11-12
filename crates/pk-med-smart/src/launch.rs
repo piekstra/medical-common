@@ -96,7 +96,7 @@ impl SmartSignIn {
     /// Whether the answer's `iss` (RFC 9207) is checked against the
     /// discovered issuer. Only when discovery named one: the `/metadata`
     /// fallback never does, and a well-known document may leave it out.
-    /// Even then an answer without `iss` passes (cli-common v0.31.0), so a
+    /// Even then an answer without `iss` passes (cli-common v0.31.1), so a
     /// mix-up between two authorization servers is caught only for servers
     /// that send it. The session records the issuer it was bound to
     /// ([`SmartSession::issuer`]).

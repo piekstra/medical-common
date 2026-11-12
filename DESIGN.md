@@ -28,7 +28,7 @@ profile in `info` (`profiles: ["health-records/v1", "documents/v1"]`).
 <bin> auth login --org <ORG> [--label <WHO>]      # browser sign-in, PKCE, loopback redirect
 <bin> patients list                               # patient-list/v1
 <bin> records export --patient <ID> [--since <YYYY-MM-DD>] --ndjson    # records-stream/v1 on stdout
-<bin> records export --patient <ID> [--since <YYYY-MM-DD>] -o <DIR>    # the same stream to <DIR>/records.ndjson; records-export/v1 on stdout
+<bin> records export --patient <ID> [--since <YYYY-MM-DD>] -o <DIR>    # the same stream to <DIR>/records.ndjson (records.incomplete.ndjson if it ends incomplete); records-export/v1 on stdout, its path the file written
 <bin> documents list | download                   # documents/v1 (§1.7)
 <bin> api GET <PATH>                              # passthrough, GET only
 ```
@@ -210,12 +210,31 @@ name, and the line and column.
 ### 1.5 `records export -o <DIR>` (`records-export/v1`)
 
 The same stream, to `<DIR>/records.ndjson`, by
-`pk_med_records::create_export_file`: the directory is created with mode
-0700 when missing, and the file is created new with mode 0600 under a
-temporary name (`O_EXCL`, which follows no link) and renamed into place. An
-ordinary file or a hard link already at `records.ndjson` is replaced by the
-rename and never written through. A symbolic link there is refused, never
-followed: exit 2 (`CliError::Usage`), and nothing is written. stdout gets one `records-export/v1` document: `{schema, path,
+`pk_med_records::create_export_file`, which returns an `ExportFile`. The
+directory is created with mode 0700 when missing, and the stream is written
+to a new file with mode 0600 under a temporary name in it (`O_EXCL`, which
+follows no link). `ExportFile::commit(&finished)`, called with what
+`RecordsWriter::finish` returned, syncs the file, renames it into place and
+syncs the directory:
+
+- A complete stream goes to `records.ndjson`, and removes any
+  `records.incomplete.ndjson`, which is older.
+- An incomplete one (`complete: false`: a provider's error stopped the
+  pull) goes to `records.incomplete.ndjson`, and the last complete export
+  at `records.ndjson` is kept.
+
+Until the commit nothing at either name changes, so an export that is
+killed, runs out of space or fails leaves the last complete one. An
+`ExportFile` dropped without a commit removes its file. A run killed before
+that leaves it, hidden as `.records.ndjson.<pid>.<nanos>.<n>.tmp`: each
+export holds a lock on its own file while it runs, and the next export to
+the directory removes every such file of the same owner that no live
+process holds. A filesystem without locks (some network mounts) gets no
+sweep, since a leftover there cannot be told from a live export. An ordinary file or a hard link already at either name is
+replaced by the rename and never written through. A symbolic link at
+`records.ndjson` is refused, never followed: exit 2 (`CliError::Usage`), and
+nothing is written. stdout gets one `records-export/v1` document (`path` being where `commit`
+put it): `{schema, path,
 bytes, complete, counts, skipped?}`, `bytes` being the whole file, trailer
 included (`RecordsExport::new(path, &finished)`, from what
 `RecordsWriter::finish` returned). Development and tests use it with
@@ -362,7 +381,7 @@ code runs over `pk_cli_http::BlockingTransport` (driven with
   with reason `pk_med_fhir::UNREACHABLE` (`Reason::Provider("unreachable")`):
   the connection failed, timed out, or broke before the whole answer was
   read. A server that answered with an error status has no such reason,
-  and a reason the transport set is kept. cli-common v0.31.0's transport
+  and a reason the transport set is kept. cli-common's transport
   does not say which of those it was, so `UNREACHABLE` is not proof the
   network is gone: one slow page that timed out three times reads the
   same. A CLI that ends a run on it, rather than skip one type, can first
@@ -391,7 +410,11 @@ severity `error` or `fatal` (a warning never does), by the issue's code: `login`
 OperationOutcome with errors in place of a resource with a 2xx is mapped the
 same way. Messages name the server's origin and the resource type, never a
 query, an id or a token, and quote the outcome's text cut to printable
-characters.
+characters. What to do next is the error's remedy, not part of its
+message: `outcome::SIGN_IN_AGAIN` on exit 3 with `CredentialRefused`,
+`outcome::TRY_AGAIN` on an answer that says nothing. A CLI replaces it with
+its own (`err.with_remedy("run auth login --org …")`) instead of printing
+two.
 
 ### 2.3 `test-util`: the mock server
 
@@ -442,7 +465,7 @@ redirect, RFC 9207 `iss`, the token and registration endpoints) and its
    `state`, the scopes, and `aud`, which is the FHIR base with no trailing
    `/`, or `aud` when the server spells it differently. When discovery named
    an issuer, an answer whose `iss` differs is refused (exit 3). An answer
-   without `iss` passes (cli-common v0.31.0 has no way to require it), and
+   without `iss` passes (cli-common v0.31.1 has no way to require it), and
    the `/metadata` fallback names no issuer at all, so there the RFC 9207
    check does not run. `SmartSignIn::issuer_checked()` says whether it can,
    and the session keeps the issuer it was bound to.
@@ -600,4 +623,4 @@ does not convert to the other.
 | medical-common | cli-common |
 |---|---|
 | v0.1.0 | v0.31.0 |
-| v0.2.0 | v0.31.0 |
+| v0.2.0 | v0.31.1 |
