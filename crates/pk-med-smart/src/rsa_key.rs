@@ -13,7 +13,10 @@ use rsa::PrivateKey;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use zeroize::Zeroizing;
+
 use crate::assertion::JwtSigner;
+use crate::session::DynamicClient;
 
 /// The JWS algorithm: RSASSA-PKCS1-v1_5 with SHA-384.
 pub const RS384: &str = "RS384";
@@ -43,14 +46,29 @@ impl RsaKey {
         Ok(Self::from_key(key))
     }
 
-    /// The key as [`Self::to_pkcs8`] wrote it.
+    /// The key as [`Self::to_pkcs8`] wrote it. A key under
+    /// [`Self::MIN_BITS`] is refused, as [`Self::generate`] refuses one.
     pub fn from_pkcs8(encoded: &Secret) -> Result<Self, CliError> {
-        let der = base64::engine::general_purpose::STANDARD
-            .decode(encoded.expose().trim())
-            .map_err(|_| CliError::Other("the stored RSA key is not base64".into()))?;
+        let der = Zeroizing::new(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded.expose().trim())
+                .map_err(|_| CliError::Other("the stored RSA key is not base64".into()))?,
+        );
         let key = PrivateKey::from_pkcs8_der(&der)
             .map_err(|_| CliError::Other("the stored RSA key is not a PKCS#8 RSA key".into()))?;
+        if modulus_bits(&key) < Self::MIN_BITS {
+            return Err(CliError::Other(format!(
+                "the stored RSA key is under {} bits",
+                Self::MIN_BITS
+            )));
+        }
         Ok(Self::from_key(key))
+    }
+
+    /// The key a registered client keeps ([`DynamicClient::key`]): the
+    /// signer a [`crate::Renewer`] makes for it.
+    pub fn for_client(client: &DynamicClient) -> Result<Self, CliError> {
+        Self::from_pkcs8(&client.key())
     }
 
     /// PKCS#8 DER in base64, the form [`crate::DynamicClient`] keeps.
@@ -116,6 +134,16 @@ impl std::fmt::Debug for RsaKey {
     }
 }
 
+/// The modulus's size in bits, from its big-endian bytes.
+fn modulus_bits(key: &PrivateKey) -> usize {
+    let n = key.n_bytes();
+    let first = n.iter().position(|&b| b != 0).unwrap_or(n.len());
+    match n.get(first) {
+        Some(top) => (n.len() - first) * 8 - top.leading_zeros() as usize,
+        None => 0,
+    }
+}
+
 fn public_parts(key: &PrivateKey) -> (String, String) {
     (b64url(&key.n_bytes()), b64url(&key.e_bytes()))
 }
@@ -160,5 +188,18 @@ mod tests {
 
         assert_eq!(RsaKey::generate(1024).unwrap_err().exit_code(), 2);
         assert!(RsaKey::from_pkcs8(&Secret::new("not base64!")).is_err());
+        assert_eq!(modulus_bits(&key.key), 2048);
+
+        let client = DynamicClient::new("c", RS384, Some(key.kid().to_string()), stored);
+        assert_eq!(RsaKey::for_client(&client).unwrap().kid(), key.kid());
+    }
+
+    #[test]
+    fn a_stored_key_under_2048_bits_is_refused() {
+        let small = PrivateKey::new(&mut getrandom::SysRng, 1024).unwrap();
+        let der = small.to_pkcs8_der().unwrap();
+        let stored = Secret::new(base64::engine::general_purpose::STANDARD.encode(der.as_bytes()));
+        let err = RsaKey::from_pkcs8(&stored).unwrap_err();
+        assert!(err.to_string().contains("2048"), "{err}");
     }
 }

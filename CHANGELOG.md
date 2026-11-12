@@ -4,18 +4,31 @@
 
 Pins cli-common v0.31.0, as v0.1.0 does.
 
-- `pk-med-smart`: SMART App Launch (DESIGN.md §3). `discover` (the
-  well-known document, falling back to `/metadata` on a 4xx; https
-  endpoints only); `ScopeSet` and `ScopeVersion` (v1 and v2, explicit
-  per-type scopes, a vendor's own string); `begin` / `SmartSignIn` (PKCE
-  S256, `aud`, registered ports, the issuer checked) and `exchange` for
-  public and `client_secret_basic` clients; `LaunchContext`;
-  `SmartSession`, one keychain item per organization and patient at
-  `smart/<org>/<patient>`, through `SessionStore` (`CredentialStore`,
-  `MemoryStore`); `Renewer::fresh` and `after_refusal` under
-  `RefreshLock`, sending the stored scope; `register_dynamic_client` and
-  `jwt_bearer_tokens` with `JwtSigner` and `signed_assertion` (Epic);
-  `VendorQuirks`. Feature `rsa`: `RsaKey`, an RS384 key (rsa 0.10).
+- `pk-med-smart`: SMART App Launch (DESIGN.md §3).
+  - `discover`: the well-known document, falling back to `/metadata` on a
+    3xx or a 4xx. Every URL it keeps must be https; plain http to this
+    machine only for a server whose base is one.
+  - `ScopeSet` and `ScopeVersion`: v1 and v2, explicit per-type scopes, a
+    vendor's own string.
+  - `begin` / `SmartSignIn`: PKCE S256, `aud` (no trailing slash),
+    registered ports, the issuer checked when discovery names one
+    (`issuer_checked`). `exchange` for public and `client_secret_basic`
+    clients. `LaunchContext`.
+  - `SmartSession` (`format` 1), one keychain item per organization and
+    patient at `smart/<org>/<patient>` with `%` and `/` encoded, through
+    `SessionStore` (`CredentialStore`, `MemoryStore`). Errors name no value
+    and no patient id.
+  - `Renewer::fresh`, `renew` and `after_refusal` under `RefreshLock`. A
+    refresh asks for the scope granted. A renewer for another client is
+    refused. A registered client's signer is made from the session read
+    under the lock (`SignerFor`).
+  - `register_dynamic_client` (registration only; the first JWT-bearer
+    grant is the `Renewer`'s, so a failed grant loses no client) and
+    `jwt_bearer_tokens`, with `JwtSigner` and `signed_assertion` (Epic),
+    assertions living 4 minutes.
+  - `VendorQuirks`.
+  - Feature `rsa`: `RsaKey`, an RS384 key of at least 2048 bits (rsa 0.10),
+    with `RsaKey::for_client`.
 
 ## v0.1.0 — 2026-11-12
 

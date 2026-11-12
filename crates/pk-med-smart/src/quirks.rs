@@ -28,11 +28,19 @@ pub trait VendorQuirks {
         requested
     }
 
-    /// The scope sent with a refresh. SMART leaves it optional; some servers
-    /// narrow the grant without it, so the default sends the scope stored at
-    /// sign-in.
+    /// The scope sent with a refresh, and with a registered client's
+    /// JWT-bearer grant; `None` sends none. SMART leaves it optional, and a
+    /// refresh may ask only for what was granted (RFC 6749 §6), which can be
+    /// less than was asked for when the person unticked a category at
+    /// consent. The default sends the granted scope (the token set's), else
+    /// the scope asked for at sign-in when the server named none.
     fn refresh_scope(&self, session: &SmartSession) -> Option<String> {
-        Some(session.scope.clone()).filter(|s| !s.is_empty())
+        session
+            .tokens
+            .scope
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| Some(session.scope.clone()).filter(|s| !s.is_empty()))
     }
 
     /// Whether `aud` goes on the authorization request. SMART requires it; a

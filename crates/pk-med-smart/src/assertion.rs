@@ -13,6 +13,9 @@ use serde_json::{json, Value};
 pub const JWT_BEARER: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 /// The longest lifetime an assertion gets: 5 minutes, Epic's limit.
 pub const MAX_LIFETIME_SECS: u64 = 300;
+/// The lifetime [`crate::jwt_bearer_tokens`] gives: 4 minutes, a minute
+/// inside Epic's limit for a clock running ahead of the server's.
+pub const DEFAULT_LIFETIME_SECS: u64 = 240;
 
 /// Signs a JWT's signing input with the client's private key.
 pub trait JwtSigner {

@@ -9,8 +9,9 @@
 //!    patient, [`account`]) under `RefreshLock::store_signin`.
 //! 4. Before each use, [`Renewer::fresh`] renews a lapsed token under the
 //!    refresh lock: a refresh token, or a registered client's signed
-//!    JWT-bearer grant ([`register_dynamic_client`], [`JwtSigner`]; feature
-//!    `rsa` adds an RS384 key, `RsaKey`).
+//!    JWT-bearer grant. [`register_dynamic_client`] registers the client and
+//!    returns the session to store; [`Renewer::renew`] makes its first grant
+//!    ([`JwtSigner`]; feature `rsa` adds an RS384 key, `RsaKey`).
 //!
 //! What a vendor does differently goes in a [`VendorQuirks`]. Tokens never
 //! appear in `Debug` output or messages.
@@ -26,13 +27,19 @@ pub mod rsa_key;
 pub mod scopes;
 pub mod session;
 
-pub use assertion::{jwt_bearer_grant, signed_assertion, JwtSigner, JWT_BEARER};
+pub use assertion::{
+    jwt_bearer_grant, signed_assertion, JwtSigner, DEFAULT_LIFETIME_SECS, JWT_BEARER,
+    MAX_LIFETIME_SECS,
+};
 pub use discovery::{discover, SmartConfiguration};
 pub use launch::{begin, LaunchRequest, SmartApp, SmartSignIn};
 pub use quirks::{NoQuirks, VendorQuirks};
 pub use register::{jwt_bearer_tokens, register_dynamic_client};
-pub use renew::Renewer;
+pub use renew::{Renewer, SignerFor};
 #[cfg(feature = "rsa")]
 pub use rsa_key::RsaKey;
 pub use scopes::{ScopeSet, ScopeVersion};
-pub use session::{account, DynamicClient, LaunchContext, MemoryStore, SessionStore, SmartSession};
+pub use session::{
+    account, decode_session, DynamicClient, LaunchContext, MemoryStore, SessionStore, SmartSession,
+    SESSION_FORMAT,
+};

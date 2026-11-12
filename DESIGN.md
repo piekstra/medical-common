@@ -391,11 +391,17 @@ redirect, RFC 9207 `iss`, the token and registration endpoints) and its
 ### 3.1 The sign-in (`auth login`)
 
 1. **Discovery.** `discover(transport, fhir_base, quirks, bin, version)`
-   reads `<base>/.well-known/smart-configuration`. On a 4xx (not 429), or a
-   document that does not read, it reads the `oauth-uris` extension of
-   `<base>/metadata` instead. A 429 or 5xx is exit 5 with no fallback: the
-   server said nothing about where to sign in. Every endpoint it returns must
-   be `https` (or `http` to the loopback, for the mock), else exit 5.
+   reads `<base>/.well-known/smart-configuration`. On a 3xx (redirects are
+   not followed), a 4xx (not 429), or a document that does not read, it
+   reads the `oauth-uris` extension of `<base>/metadata` instead. A 429 or
+   5xx is exit 5 with no fallback: the server said nothing about where to
+   sign in. Every URL the configuration keeps (the issuer and the
+   authorization, token, registration, revocation and JWK Set endpoints)
+   must be `https`, else exit 5. Plain `http` to this machine is allowed
+   only when the FHIR base is itself `http` to this machine (the mock): an
+   `https` server naming a local `http` endpoint would send the code, a
+   client secret and the tokens to whatever local process holds the port
+   (`SmartConfiguration::check_for`).
 2. **Scopes.** `ScopeSet::standalone_patient()` is `openid fhirUser
    launch/patient offline_access`. Add `read_all(version)` (`patient/*.read`
    or `patient/*.rs`) or `read_types(version, &[types])` for a server that
@@ -405,9 +411,13 @@ redirect, RFC 9207 `iss`, the token and registration endpoints) and its
 3. **Authorize.** `begin(&SmartApp, LaunchRequest)` binds the listener on
    the first free registered port (none registered: any port) and builds the
    URL: PKCE S256 (a server that lists methods without S256 is refused),
-   `state`, the scopes, and `aud`, which is the FHIR base, or `aud` when the
-   server spells it differently. When discovery named an issuer, an answer
-   whose `iss` differs is refused.
+   `state`, the scopes, and `aud`, which is the FHIR base with no trailing
+   `/`, or `aud` when the server spells it differently. When discovery named
+   an issuer, an answer whose `iss` differs is refused (exit 3). An answer
+   without `iss` passes (cli-common v0.31.0 has no way to require it), and
+   the `/metadata` fallback names no issuer at all, so there the RFC 9207
+   check does not run. `SmartSignIn::issuer_checked()` says whether it can,
+   and the session keeps the issuer it was bound to.
 4. **Exchange.** `SmartSignIn::wait_for_code(timeout, on_refused)`, then
    `exchange(oauth, client, code, organization, now)` returns a
    `SmartSession`. The client is public (`ClientAuth::Public`) or
@@ -426,16 +436,22 @@ for display. The FHIR server, not this crate, decides access.
 
 One JSON item per (organization, patient), at account
 `smart/<organization>/<patient>` (`account()`; `_` for a sign-in with no
-patient in its context). This is the `session` a `PatientContext` names
+patient in its context). Each part has `%` and `/` percent-encoded
+(`a/b` is `a%2Fb`), so two different pairs never name one item; a FHIR id
+has neither character. This is the `session` a `PatientContext` names
 (§1.3). `SessionStore` is implemented for cli-common's `CredentialStore`
-(`get_json` / `set_json`); `MemoryStore` serves tests.
+(the item read and written as text, decoded here); `MemoryStore` serves
+tests. An item that does not read is an error naming a line and a column,
+never a value, and a keychain error shows the account as
+`smart/<organization>/…`, never the patient's id.
 
 | Field | |
 |---|---|
+| `format` | the item's shape, `SESSION_FORMAT` (1). A release refuses an item with a newer format ("written by a newer release of this CLI; update it") rather than read it in its own shape and write it back. An item without one is format 1 |
 | `organization`, `patient`, `fhir_user` | who the sign-in is for |
 | `fhir_base`, `issuer`, `token_endpoint` | where it was made; renewal reads these, not a fresh discovery |
 | `client_id` | the client the tokens were issued to |
-| `scope` | the scope asked for, sent again on a refresh |
+| `scope` | the scope asked for; the scope granted is `tokens.scope` |
 | `tokens` | cli-common's `TokenSet`: access and refresh tokens, `expires_at`, the ID token, the answer's other members |
 | `dynamic_client` | a client registered for this sign-in (§3.4) |
 | `extra` | a vendor's own state |
@@ -452,15 +468,28 @@ patient in its context). This is the `session` a `PatientContext` names
   before releasing the lock. Two processes never spend one refresh token.
 - `after_refusal(account, refused_access_token, now)` renews after a 401,
   unless another process already replaced the refused token.
-- A refresh sends the stored scope (some servers narrow the grant without
-  it; `VendorQuirks::refresh_scope` can change that). A session from a
-  registered client renews with the JWT-bearer grant instead, and needs
-  `Renewer::signer`.
+- `renew(account, now)` renews now, due or not, unless another process
+  renewed since it read the item: the first grant after a registration
+  (§3.4).
+- A refresh sends the scope granted (`tokens.scope`), or the scope asked
+  for when the server named none: a refresh may ask only for what was
+  granted (RFC 6749 §6), and a person can untick categories at consent.
+  `VendorQuirks::refresh_scope` can change that, or send none.
+- The renewer's `client` must be the one the tokens were issued to
+  (`session.client_id`). Another client is refused before anything is
+  sent, so one organization's secret never goes to another's server.
+- A session from a registered client renews with the JWT-bearer grant
+  instead. `Renewer::signer` takes a function that makes the signer from
+  the `DynamicClient` read under the lock (`RsaKey::for_client` with
+  feature `rsa`), so a sign-in another process stored meanwhile is signed
+  with its own key. A signer whose `alg` or `kid` differs from the stored
+  client's is refused before anything is sent.
 
 | Condition | Exit | `Reason` |
 |---|---|---|
 | nothing stored at the account | 3 | `NoCredential` |
 | lapsed, and no refresh token or registered client | 3 | `CredentialRefused` |
+| the renewer's client is not the session's, or the signer's key is not the registered one | 1 | |
 | the token endpoint refuses | as `pk_cli_auth::oauth::refusal` maps it (`invalid_grant` is 3, `CredentialRefused`) | |
 
 `fresh` is synchronous because the refresh lock is. The grant inside it
@@ -475,21 +504,32 @@ refresh token.
 
 1. Sign in as in §3.1.
 2. `register_dynamic_client(oauth, config, session, software_id, jwks,
-   signer, key, now)` posts the registration with the exchange's access
-   token as the initial access token. The metadata carries `software_id`
-   (Epic: the app's client id), the public JWK Set,
-   `token_endpoint_auth_method: private_key_jwt` and the JWT-bearer grant.
-   It then makes the first JWT-bearer grant, and returns the session with
-   `dynamic_client` set and the new tokens. Store it.
-3. Each assertion has `iss` = `sub` = the registered client id, `aud` = the
-   token endpoint, a random `jti`, and `exp` at most 5 minutes after `iat`.
+   signer, key)` posts the registration with the exchange's access token as
+   the initial access token. The metadata carries `software_id` (Epic: the
+   app's client id), the public JWK Set, the JWT-bearer grant type, no
+   response types, and `token_endpoint_auth_method: none`: the assertion is
+   the grant (RFC 7523 §2.1), not a client authentication. It sends nothing
+   else and returns the session with `dynamic_client` set and the
+   exchange's tokens unchanged.
+3. Store it (`RefreshLock::store_signin`), then `Renewer::renew` makes the
+   first JWT-bearer grant under the lock. Registration and grant are two
+   steps so that a grant that fails (a 5xx, a clock the server disputes)
+   loses nothing: the client and its key are stored, the next `fresh` or
+   `renew` tries again, and no second client is registered.
+4. Each assertion has `iss` = `sub` = the registered client id, `aud` = the
+   token endpoint, a random `jti`, and `exp` 4 minutes after `iat`
+   (`DEFAULT_LIFETIME_SECS`), a minute inside Epic's 5-minute limit for a
+   clock running ahead. The grant sends `client_id` and the scope
+   `VendorQuirks::refresh_scope` gives (Epic documents none: a quirk
+   returns `None`).
 
 Signing goes through the `JwtSigner` trait (`alg`, `kid`, `sign`), so the
 crate holds no key type by default. Feature `rsa` adds `RsaKey`: it
 generates an RS384 key of at least 2048 bits from the system's random
 source (Epic documents 2048), and provides `jwks()` (the public half only),
 `kid()` (the RFC 7638 thumbprint), and `to_pkcs8()` / `from_pkcs8()` for
-the keychain form that `DynamicClient` keeps. It uses `rsa` 0.10, the
+the keychain form that `DynamicClient` keeps. A stored key under 2048 bits
+is refused on load, and the decoded key bytes are zeroed. It uses `rsa` 0.10, the
 release that RUSTSEC-2023-0071 (Marvin) names as patched.
 
 ### 3.5 Vendor quirks
@@ -503,7 +543,7 @@ Every method defaults to SMART as written (`NoQuirks`).
 | `metadata_first` | `false` | a server whose `/metadata` is the reliable document |
 | `authorize_params` | none | a tenant or practice selector |
 | `scopes(requested)` | as requested | a server that refuses wildcards or spells scopes its own way |
-| `refresh_scope(session)` | the stored scope | a server that refuses a scope on refresh |
+| `refresh_scope(session)` | the scope granted, else the scope asked for | a server that refuses a scope on refresh or on the JWT-bearer grant (`None`) |
 | `send_aud` | `true` | a server that refuses `aud` |
 
 ### 3.6 Tests

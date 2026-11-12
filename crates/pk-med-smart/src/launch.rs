@@ -31,7 +31,8 @@ pub struct SmartApp {
 /// What a sign-in is for.
 pub struct LaunchRequest<'a> {
     pub config: &'a SmartConfiguration,
-    /// The FHIR base, and SMART's `aud` unless `aud` says otherwise.
+    /// The FHIR base, and SMART's `aud` (with no trailing `/`) unless `aud`
+    /// says otherwise.
     pub fhir_base: &'a str,
     /// `aud` as the server spells the base, when that differs from
     /// `fhir_base` (a directory's own host case).
@@ -59,7 +60,10 @@ pub fn begin(app: &SmartApp, request: LaunchRequest<'_>) -> Result<SmartSignIn, 
     .scope(&scope)
     .ports(&app.ports);
     if request.quirks.send_aud() {
-        flow = flow.param("aud", request.aud.unwrap_or(request.fhir_base));
+        let aud = request
+            .aud
+            .unwrap_or_else(|| request.fhir_base.trim_end_matches('/'));
+        flow = flow.param("aud", aud);
     }
     for (name, value) in request.quirks.authorize_params() {
         flow = flow.param(name, value);
@@ -87,6 +91,17 @@ impl SmartSignIn {
     /// The address to print and open.
     pub fn url(&self) -> &str {
         self.pending.url()
+    }
+
+    /// Whether the answer's `iss` (RFC 9207) is checked against the
+    /// discovered issuer. Only when discovery named one: the `/metadata`
+    /// fallback never does, and a well-known document may leave it out.
+    /// Even then an answer without `iss` passes (cli-common v0.31.0), so a
+    /// mix-up between two authorization servers is caught only for servers
+    /// that send it. The session records the issuer it was bound to
+    /// ([`SmartSession::issuer`]).
+    pub fn issuer_checked(&self) -> bool {
+        self.config.issuer.is_some()
     }
 
     pub fn redirect_uri(&self) -> &str {
@@ -124,6 +139,7 @@ impl SmartSignIn {
         let context = LaunchContext::from_response(&response);
         let tokens = TokenSet::from_response(response, now, None);
         Ok(SmartSession {
+            format: crate::session::SESSION_FORMAT,
             organization: organization.to_string(),
             patient: context.patient,
             fhir_user: context.fhir_user,

@@ -10,18 +10,26 @@ use pk_cli_core::{CliError, Reason};
 use crate::assertion::JwtSigner;
 use crate::quirks::VendorQuirks;
 use crate::register::jwt_bearer_tokens;
-use crate::session::{SessionStore, SmartSession};
+use crate::session::{DynamicClient, SessionStore, SmartSession};
+
+/// Makes the signer for a registered client from the client as the session
+/// stores it, read under the refresh lock. With feature `rsa`:
+/// `&|client| Ok(Box::new(RsaKey::for_client(client)?))`.
+pub type SignerFor<'s> = dyn Fn(&DynamicClient) -> Result<Box<dyn JwtSigner>, CliError> + 's;
 
 /// Everything a renewal needs. `client` is how the CLI authenticates to the
 /// token endpoint (public, or `SecretBasic` with the secret from the
-/// keychain); `signer` is the key of a dynamically registered client.
+/// keychain), and must be the client the session's tokens were issued to.
+/// `signer` makes a registered client's signer from the session read under
+/// the lock, so a sign-in another process stored meanwhile is signed with
+/// its own key.
 pub struct Renewer<'a, T> {
     pub store: &'a dyn SessionStore,
     pub lock: &'a RefreshLock,
     pub oauth: &'a OAuthClient<T>,
     pub client: &'a ClientAuth,
     pub quirks: &'a dyn VendorQuirks,
-    pub signer: Option<&'a dyn JwtSigner>,
+    pub signer: Option<&'a SignerFor<'a>>,
     /// Treat a token expiring within this many seconds as lapsed.
     pub skew_secs: u64,
 }
@@ -45,7 +53,7 @@ impl<'a, T: Transport> Renewer<'a, T> {
         }
     }
 
-    pub fn signer(mut self, signer: &'a dyn JwtSigner) -> Self {
+    pub fn signer(mut self, signer: &'a SignerFor<'a>) -> Self {
         self.signer = Some(signer);
         self
     }
@@ -68,6 +76,15 @@ impl<'a, T: Transport> Renewer<'a, T> {
             |latest| latest.tokens.is_expired(now, self.skew_secs),
             |latest| self.grant_and_store(latest, now),
         )
+    }
+
+    /// Renew now, due or not, unless another process renewed since this
+    /// read: the first JWT-bearer grant after
+    /// [`crate::register_dynamic_client`], or a token the CLI wants
+    /// replaced.
+    pub fn renew(&self, account: &str, now: u64) -> Result<SmartSession, CliError> {
+        let read = self.load(account)?;
+        self.after_refusal(account, &read.tokens.access_token, now)
     }
 
     /// Renew after the server refused `refused_access_token` (a 401), unless
@@ -103,12 +120,28 @@ impl<'a, T: Transport> Renewer<'a, T> {
 
     async fn grant(&self, session: &SmartSession, now: u64) -> Result<TokenSet, CliError> {
         if let Some(client) = &session.dynamic_client {
-            let signer = self.signer.ok_or_else(|| {
+            let make = self.signer.ok_or_else(|| {
                 CliError::Other(
                     "this session's client signs its grants, and no signer was given".into(),
                 )
             })?;
-            return jwt_bearer_tokens(self.oauth, session, client, signer, now).await;
+            let signer = make(client)?;
+            if signer.alg() != client.alg || (client.kid.is_some() && signer.kid() != client.kid) {
+                return Err(CliError::Other(
+                    "the signer's key is not the one this session's client registered; nothing \
+                     was sent"
+                        .into(),
+                ));
+            }
+            return jwt_bearer_tokens(self.oauth, session, client, &*signer, self.quirks, now)
+                .await;
+        }
+        if self.client.client_id() != session.client_id {
+            return Err(CliError::Other(
+                "this sign-in was issued to another client than the one renewing it; nothing \
+                 was sent"
+                    .into(),
+            ));
         }
         let Some(refresh_token) = session.tokens.refresh_token() else {
             return Err(CliError::Auth(

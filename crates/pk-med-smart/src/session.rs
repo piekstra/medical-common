@@ -12,14 +12,37 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zeroize::Zeroize;
 
-/// The keychain account of a sign-in.
+/// The keychain account of a sign-in: `smart/<organization>/<patient>`, each
+/// part with `%` and `/` percent-encoded, so two different pairs never name
+/// one item (`a/b` and `c` against `a` and `b/c`). A FHIR id has neither
+/// character, so a patient id is kept as it is.
 pub fn account(organization: &str, patient: &str) -> String {
-    format!("smart/{organization}/{patient}")
+    format!(
+        "smart/{}/{}",
+        account_part(organization),
+        account_part(patient)
+    )
+}
+
+fn account_part(part: &str) -> String {
+    part.replace('%', "%25").replace('/', "%2F")
+}
+
+/// The [`SmartSession::format`] this release writes, and the newest it reads.
+pub const SESSION_FORMAT: u32 = 1;
+
+fn first_format() -> u32 {
+    1
 }
 
 /// What a SMART sign-in leaves to keep. `Debug` shows no token or key.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SmartSession {
+    /// The item's shape: [`SESSION_FORMAT`] when written by this release. A
+    /// release reading an item with a newer format refuses it rather than
+    /// read it in its own shape and write it back.
+    #[serde(default = "first_format")]
+    pub format: u32,
     /// The CLI's organization id.
     pub organization: String,
     /// The launch context's patient, the FHIR `Patient.id`.
@@ -37,7 +60,9 @@ pub struct SmartSession {
     pub token_endpoint: String,
     /// The client the tokens were issued to.
     pub client_id: String,
-    /// The scope asked for at sign-in, sent again on a refresh.
+    /// The scope asked for at sign-in. The scope granted is the token set's
+    /// (`tokens.scope`), and a refresh asks for that
+    /// ([`crate::VendorQuirks::refresh_scope`]).
     #[serde(default)]
     pub scope: String,
     pub tokens: TokenSet,
@@ -192,18 +217,67 @@ pub trait SessionStore {
     fn delete(&self, account: &str) -> Result<bool, CliError>;
 }
 
-/// One keychain item per session (`get_json`/`set_json`).
+/// Read a stored session. The error names a line and a column, never a
+/// value (serde's own message would quote one: a token) and never the
+/// account (it holds the patient's id). A newer [`SmartSession::format`]
+/// is refused.
+pub fn decode_session(text: &str) -> Result<SmartSession, CliError> {
+    let session: SmartSession = serde_json::from_str(text).map_err(|e| {
+        CliError::Keychain(format!(
+            "a stored SMART session does not read (line {}, column {}); clear it with `auth \
+             logout --forget` and sign in again",
+            e.line(),
+            e.column()
+        ))
+    })?;
+    if session.format > SESSION_FORMAT {
+        return Err(CliError::Keychain(format!(
+            "a stored SMART session has format {}, written by a newer release of this CLI \
+             (this one reads up to {SESSION_FORMAT}); update it",
+            session.format
+        )));
+    }
+    Ok(session)
+}
+
+fn encode_session(session: &SmartSession) -> Result<Secret, CliError> {
+    serde_json::to_string(session)
+        .map(Secret::new)
+        .map_err(|_| CliError::Other("a SMART session did not serialize".into()))
+}
+
+/// The keychain's error with the account, which holds the patient's id, put
+/// as `smart/<organization>/…`.
+fn without_account(e: CliError, account: &str) -> CliError {
+    let text = e.to_string();
+    if !text.contains(account) {
+        return e;
+    }
+    let shown = match account.rsplit_once('/') {
+        Some((head, _)) => format!("{head}/…"),
+        None => "a SMART session".to_string(),
+    };
+    CliError::Keychain(text.replace(account, &shown))
+}
+
+/// One keychain item per session, written and read as JSON here rather than
+/// through `get_json`, whose errors name the account and quote values.
 impl SessionStore for CredentialStore {
     fn load(&self, account: &str) -> Result<Option<SmartSession>, CliError> {
-        self.get_json(account)
+        let Some(text) = self.get(account).map_err(|e| without_account(e, account))? else {
+            return Ok(None);
+        };
+        decode_session(text.expose()).map(Some)
     }
 
     fn save(&self, session: &SmartSession) -> Result<(), CliError> {
-        self.set_json(&session.account(), session)
+        let account = session.account();
+        self.set(&account, &encode_session(session)?)
+            .map_err(|e| without_account(e, &account))
     }
 
     fn delete(&self, account: &str) -> Result<bool, CliError> {
-        CredentialStore::delete(self, account)
+        CredentialStore::delete(self, account).map_err(|e| without_account(e, account))
     }
 }
 
@@ -218,27 +292,72 @@ impl SessionStore for MemoryStore {
         self.items
             .borrow()
             .get(account)
-            .map(|text| {
-                // serde's message would quote the value it refused: a token.
-                serde_json::from_str(text).map_err(|e| {
-                    CliError::Other(format!(
-                        "a stored session does not read (line {}, column {})",
-                        e.line(),
-                        e.column()
-                    ))
-                })
-            })
+            .map(|text| decode_session(text))
             .transpose()
     }
 
     fn save(&self, session: &SmartSession) -> Result<(), CliError> {
-        let text = serde_json::to_string(session)
-            .map_err(|e| CliError::Other(format!("serializing a session: {e}")))?;
-        self.items.borrow_mut().insert(session.account(), text);
+        let text = encode_session(session)?;
+        self.items
+            .borrow_mut()
+            .insert(session.account(), text.expose().to_string());
         Ok(())
     }
 
     fn delete(&self, account: &str) -> Result<bool, CliError> {
         Ok(self.items.borrow_mut().remove(account).is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn two_pairs_never_share_an_account() {
+        assert_eq!(account("org-1", "pat-1"), "smart/org-1/pat-1");
+        assert_ne!(account("a/b", "c"), account("a", "b/c"));
+        assert_eq!(account("a/b", "c"), "smart/a%2Fb/c");
+        assert_ne!(account("a%2Fb", "c"), account("a/b", "c"));
+    }
+
+    fn stored(format: u32) -> String {
+        format!(
+            r#"{{"format":{format},"organization":"org-1","patient":"111111111","fhir_base":"https://fhir.example.test","token_endpoint":"https://fhir.example.test/token","client_id":"c","scope":"openid","tokens":{{"access_token":"synthetic-secret-token","token_type":"Bearer","obtained_at":0}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_newer_format_is_refused_and_an_older_item_reads() {
+        assert_eq!(decode_session(&stored(1)).unwrap().format, 1);
+        let unversioned = stored(1).replace(r#""format":1,"#, "");
+        assert_eq!(decode_session(&unversioned).unwrap().format, 1);
+        let err = decode_session(&stored(2)).unwrap_err();
+        assert!(err.to_string().contains("newer release"), "{err}");
+    }
+
+    #[test]
+    fn a_session_that_does_not_read_names_no_value() {
+        let broken = stored(1).replace(
+            r#""obtained_at":0"#,
+            r#""obtained_at":"synthetic-secret-token""#,
+        );
+        let err = decode_session(&broken).unwrap_err().to_string();
+        assert!(!err.contains("synthetic-secret-token"), "{err}");
+        assert!(!err.contains("111111111"), "{err}");
+    }
+
+    #[test]
+    fn a_keychain_error_names_no_patient() {
+        let account = account("org-1", "111111111");
+        let err = without_account(
+            CliError::Keychain(format!(
+                "stored item `{account}` under `piekstra.x` is damaged"
+            )),
+            &account,
+        );
+        let text = err.to_string();
+        assert!(!text.contains("111111111"), "{text}");
+        assert!(text.contains("smart/org-1/…"), "{text}");
     }
 }

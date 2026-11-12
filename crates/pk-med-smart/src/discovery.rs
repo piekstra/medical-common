@@ -111,35 +111,77 @@ impl SmartConfiguration {
                 .any(|m| m == "S256")
     }
 
-    /// Each endpoint must be `https`, or `http` to this machine for a test
-    /// server: a server's metadata decides where the sign-in goes.
+    /// Every URL it keeps: the issuer and the authorization, token,
+    /// registration, revocation and JWK Set endpoints.
+    fn urls(&self) -> [(&'static str, Option<&String>); 6] {
+        [
+            ("authorization endpoint", Some(&self.authorization_endpoint)),
+            ("token endpoint", Some(&self.token_endpoint)),
+            ("registration endpoint", self.registration_endpoint.as_ref()),
+            ("revocation endpoint", self.revocation_endpoint.as_ref()),
+            ("JWK Set", self.jwks_uri.as_ref()),
+            ("issuer", self.issuer.as_ref()),
+        ]
+    }
+
+    /// Each URL must be `https`, or `http` to this machine for a test
+    /// server: a server's metadata decides where the sign-in, the code and
+    /// the tokens go.
     fn check(&self) -> Result<(), CliError> {
-        for (what, url) in [
-            ("authorization", Some(&self.authorization_endpoint)),
-            ("token", Some(&self.token_endpoint)),
-            ("registration", self.registration_endpoint.as_ref()),
-        ] {
+        for (what, url) in self.urls() {
             let Some(url) = url else { continue };
             if url.is_empty() {
-                return Err(CliError::Upstream(format!(
-                    "the SMART configuration names no {what} endpoint"
-                )));
+                if what == "authorization endpoint" || what == "token endpoint" {
+                    return Err(CliError::Upstream(format!(
+                        "the SMART configuration names no {what}"
+                    )));
+                }
+                continue;
             }
             require_secure_url(url).map_err(|_| {
                 CliError::Upstream(format!(
-                    "the SMART configuration's {what} endpoint is not https; refusing to sign in \
-                     through it"
+                    "the SMART configuration's {what} is not https; refusing to sign in through it"
                 ))
             })?;
         }
         Ok(())
     }
+
+    /// For the configuration of the server at `fhir_base`: an `https` server
+    /// names only `https` URLs. Plain `http` to this machine is for a test
+    /// server whose own base is one, and an `https` server naming it would
+    /// send the code, a client secret and the tokens to whatever local
+    /// process holds the port. [`discover`] checks this.
+    pub fn check_for(&self, fhir_base: &str) -> Result<(), CliError> {
+        self.check()?;
+        if !is_https(fhir_base) {
+            return Ok(());
+        }
+        for (what, url) in self.urls() {
+            if let Some(url) = url.filter(|u| !u.is_empty()) {
+                if !is_https(url) {
+                    return Err(CliError::Upstream(format!(
+                        "the https FHIR server's SMART configuration names a {what} that is not \
+                         https; refusing to sign in through it"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn is_https(url: &str) -> bool {
+    url.get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
 }
 
 /// Find the server's SMART configuration. `.well-known/smart-configuration`
-/// first, then `/metadata` when it answers a 4xx or something that does not
-/// read; a quirk can ask for `/metadata` first. A 429 or a 5xx is the error:
-/// the server said nothing about where to sign in.
+/// first, then `/metadata` when it answers a 3xx (redirects are not
+/// followed), a 4xx or something that does not read; a quirk can ask for
+/// `/metadata` first. A 429 or a 5xx is the error: the server said nothing
+/// about where to sign in. The configuration is checked against the base
+/// ([`SmartConfiguration::check_for`]).
 pub async fn discover<T: Transport>(
     transport: &T,
     fhir_base: &str,
@@ -177,6 +219,12 @@ pub async fn discover<T: Transport>(
             } else {
                 SmartConfiguration::parse(&response.body)
             }
+        } else if (300..400).contains(&response.status) {
+            Err(CliError::Upstream(format!(
+                "the FHIR server at {origin} answered HTTP {} for its SMART {kind} document: a \
+                 redirect, which is not followed",
+                response.status
+            )))
         } else if (400..500).contains(&response.status) && response.status != 429 {
             Err(CliError::Upstream(format!(
                 "the FHIR server at {origin} answered HTTP {} for its SMART {kind} document",
@@ -189,7 +237,7 @@ pub async fn discover<T: Transport>(
                 response.status
             )));
         };
-        match outcome {
+        match outcome.and_then(|config| config.check_for(base).map(|()| config)) {
             Ok(config) => return Ok(config),
             Err(e) => {
                 first_error.get_or_insert(e);
