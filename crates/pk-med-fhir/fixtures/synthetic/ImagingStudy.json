@@ -1,0 +1,60 @@
+[
+  {
+    "resourceType": "ImagingStudy",
+    "id": "img-0001",
+    "identifier": [
+      {
+        "system": "urn:dicom:uid",
+        "value": "urn:oid:2.25.1"
+      }
+    ],
+    "status": "available",
+    "modality": [
+      {
+        "system": "http://dicom.nema.org/resources/ontology/DCM",
+        "code": "CT"
+      }
+    ],
+    "subject": {
+      "reference": "Patient/pat-0001",
+      "display": "Robin Testperson"
+    },
+    "started": "2020-01-02T10:00:00Z",
+    "numberOfSeries": 1,
+    "numberOfInstances": 2,
+    "description": "Synthetic study",
+    "series": [
+      {
+        "uid": "2.25.1.1",
+        "number": 1,
+        "modality": {
+          "system": "http://dicom.nema.org/resources/ontology/DCM",
+          "code": "CT"
+        },
+        "description": "Synthetic series",
+        "numberOfInstances": 2,
+        "bodySite": {
+          "display": "Synthetic site"
+        },
+        "instance": [
+          {
+            "uid": "2.25.1.1.1",
+            "sopClass": {
+              "system": "urn:ietf:rfc:3986",
+              "code": "urn:oid:1.2.840.10008.5.1.4.1.1.2"
+            },
+            "number": 1
+          },
+          {
+            "uid": "2.25.1.1.2",
+            "sopClass": {
+              "system": "urn:ietf:rfc:3986",
+              "code": "urn:oid:1.2.840.10008.5.1.4.1.1.2"
+            },
+            "number": 2
+          }
+        ]
+      }
+    ]
+  }
+]

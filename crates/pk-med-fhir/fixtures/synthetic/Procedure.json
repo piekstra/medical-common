@@ -1,0 +1,22 @@
+[
+  {
+    "resourceType": "Procedure",
+    "id": "proc-0001",
+    "status": "completed",
+    "code": {
+      "text": "Synthetic procedure"
+    },
+    "subject": {
+      "reference": "Patient/pat-0001",
+      "display": "Robin Testperson"
+    },
+    "performedDateTime": "2019-03-01",
+    "performer": [
+      {
+        "actor": {
+          "reference": "Practitioner/prac-0001"
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,18 @@
+[
+  {
+    "resourceType": "Organization",
+    "id": "org-0001",
+    "name": "Example Health",
+    "telecom": [
+      {
+        "system": "phone",
+        "value": "555-0199"
+      }
+    ]
+  },
+  {
+    "resourceType": "Organization",
+    "id": "org-0002",
+    "name": "Synthetic Plan"
+  }
+]

@@ -1,0 +1,48 @@
+[
+  {
+    "resourceType": "DocumentReference",
+    "id": "doc-0001",
+    "status": "current",
+    "type": {
+      "text": "Synthetic visit summary"
+    },
+    "category": [
+      {
+        "text": "Clinical note"
+      }
+    ],
+    "subject": {
+      "reference": "Patient/pat-0001",
+      "display": "Robin Testperson"
+    },
+    "date": "2020-01-02T12:00:00Z",
+    "author": [
+      {
+        "reference": "Practitioner/prac-0001"
+      }
+    ],
+    "content": [
+      {
+        "attachment": {
+          "contentType": "application/pdf",
+          "url": "Binary/bin-0001",
+          "title": "Synthetic visit summary",
+          "size": 597
+        },
+        "format": {
+          "code": "urn:ihe:iti:xds:2017:mimeTypeSufficient"
+        }
+      }
+    ],
+    "context": {
+      "encounter": [
+        {
+          "reference": "Encounter/enc-0001"
+        }
+      ],
+      "period": {
+        "start": "2020-01-02T09:00:00Z"
+      }
+    }
+  }
+]

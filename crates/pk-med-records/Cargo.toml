@@ -1,0 +1,25 @@
+[package]
+name = "pk-med-records"
+description = "The health-records/v1 profile: organization and patient DTOs, provenance, and the records-stream/v1 NDJSON stream."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[features]
+# A synthetic stream for consumers' tests.
+test-util = ["pk-med-fhir/test-util"]
+
+[dependencies]
+pk-cli-core = { workspace = true }
+pk-med-fhir = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+pk-med-records = { path = ".", features = ["test-util"] }
+pk-cli-http = { workspace = true }
+pk-cli-secrets = { workspace = true }

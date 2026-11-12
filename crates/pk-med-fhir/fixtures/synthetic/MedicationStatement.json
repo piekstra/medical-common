@@ -1,0 +1,15 @@
+[
+  {
+    "resourceType": "MedicationStatement",
+    "id": "medst-0001",
+    "status": "active",
+    "medicationCodeableConcept": {
+      "text": "Synthetic supplement"
+    },
+    "subject": {
+      "reference": "Patient/pat-0001",
+      "display": "Robin Testperson"
+    },
+    "effectiveDateTime": "2020-01-01"
+  }
+]

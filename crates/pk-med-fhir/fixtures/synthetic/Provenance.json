@@ -1,0 +1,25 @@
+[
+  {
+    "resourceType": "Provenance",
+    "id": "prov-0001",
+    "target": [
+      {
+        "reference": "Observation/obs-0001"
+      }
+    ],
+    "recorded": "2020-01-02T12:00:00Z",
+    "agent": [
+      {
+        "type": {
+          "text": "Author"
+        },
+        "who": {
+          "reference": "Practitioner/prac-0001"
+        },
+        "onBehalfOf": {
+          "reference": "Organization/org-0001"
+        }
+      }
+    ]
+  }
+]

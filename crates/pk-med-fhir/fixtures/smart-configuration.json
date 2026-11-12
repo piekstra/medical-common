@@ -1,0 +1,23 @@
+{
+  "issuer": "{{BASE}}",
+  "jwks_uri": "{{ORIGIN}}/jwks",
+  "authorization_endpoint": "{{ORIGIN}}/authorize",
+  "token_endpoint": "{{ORIGIN}}/token",
+  "registration_endpoint": "{{ORIGIN}}/register",
+  "token_endpoint_auth_methods_supported": ["none", "client_secret_basic", "private_key_jwt"],
+  "grant_types_supported": ["authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:jwt-bearer"],
+  "scopes_supported": ["openid", "fhirUser", "offline_access", "launch/patient", "patient/*.read", "patient/*.rs"],
+  "response_types_supported": ["code"],
+  "code_challenge_methods_supported": ["S256"],
+  "capabilities": [
+    "launch-standalone",
+    "client-public",
+    "client-confidential-symmetric",
+    "context-standalone-patient",
+    "permission-offline",
+    "permission-patient",
+    "permission-v1",
+    "permission-v2",
+    "sso-openid-connect"
+  ]
+}

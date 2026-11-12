@@ -1,0 +1,39 @@
+[
+  {
+    "resourceType": "MedicationRequest",
+    "id": "medreq-0001",
+    "status": "active",
+    "intent": "order",
+    "medicationCodeableConcept": {
+      "text": "Synthetic tablet 10 mg"
+    },
+    "subject": {
+      "reference": "Patient/pat-0001",
+      "display": "Robin Testperson"
+    },
+    "authoredOn": "2020-01-02",
+    "requester": {
+      "reference": "Practitioner/prac-0001"
+    },
+    "dosageInstruction": [
+      {
+        "text": "one tablet daily",
+        "timing": {
+          "repeat": {
+            "frequency": 1,
+            "period": 1,
+            "periodUnit": "d"
+          }
+        },
+        "doseAndRate": [
+          {
+            "doseQuantity": {
+              "value": 0.5,
+              "unit": "tablet"
+            }
+          }
+        ]
+      }
+    ]
+  }
+]

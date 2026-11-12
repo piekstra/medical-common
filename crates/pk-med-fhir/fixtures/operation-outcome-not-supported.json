@@ -1,0 +1,10 @@
+{
+  "resourceType": "OperationOutcome",
+  "issue": [
+    {
+      "severity": "error",
+      "code": "not-supported",
+      "details": { "text": "this search parameter is not supported" }
+    }
+  ]
+}

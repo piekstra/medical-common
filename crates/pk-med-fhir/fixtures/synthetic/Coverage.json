@@ -1,0 +1,62 @@
+[
+  {
+    "resourceType": "Coverage",
+    "id": "cov-0001",
+    "status": "active",
+    "type": {
+      "text": "Synthetic plan"
+    },
+    "subscriberId": "MEMBER-0000",
+    "beneficiary": {
+      "reference": "Patient/pat-0001",
+      "display": "Robin Testperson"
+    },
+    "relationship": {
+      "text": "Self",
+      "coding": [
+        {
+          "system": "http://terminology.hl7.org/CodeSystem/subscriber-relationship",
+          "code": "self",
+          "display": "Self"
+        }
+      ]
+    },
+    "period": {
+      "start": "2020-01-01"
+    },
+    "payor": [
+      {
+        "reference": "Organization/org-0002"
+      }
+    ],
+    "class": [
+      {
+        "type": {
+          "text": "Group",
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/coverage-class",
+              "code": "group",
+              "display": "Group"
+            }
+          ]
+        },
+        "value": "GROUP-0000",
+        "name": "Synthetic group"
+      }
+    ],
+    "order": 1,
+    "network": "Synthetic network",
+    "costToBeneficiary": [
+      {
+        "type": {
+          "text": "Copay"
+        },
+        "valueMoney": {
+          "value": 20.00,
+          "currency": "USD"
+        }
+      }
+    ]
+  }
+]

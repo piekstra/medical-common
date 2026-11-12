@@ -1,0 +1,23 @@
+[
+  {
+    "resourceType": "Immunization",
+    "id": "imm-0001",
+    "status": "completed",
+    "vaccineCode": {
+      "text": "Synthetic vaccine"
+    },
+    "patient": {
+      "reference": "Patient/pat-0001",
+      "display": "Robin Testperson"
+    },
+    "occurrenceDateTime": "2019-10-01",
+    "lotNumber": "LOT-0000",
+    "performer": [
+      {
+        "actor": {
+          "reference": "Practitioner/prac-0001"
+        }
+      }
+    ]
+  }
+]

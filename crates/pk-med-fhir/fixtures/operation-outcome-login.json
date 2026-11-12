@@ -1,0 +1,10 @@
+{
+  "resourceType": "OperationOutcome",
+  "issue": [
+    {
+      "severity": "error",
+      "code": "login",
+      "diagnostics": "the access token is missing, expired or not this server's"
+    }
+  ]
+}

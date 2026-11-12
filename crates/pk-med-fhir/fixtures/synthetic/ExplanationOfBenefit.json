@@ -1,0 +1,232 @@
+[
+  {
+    "resourceType": "ExplanationOfBenefit",
+    "id": "eob-0001",
+    "meta": {
+      "profile": [
+        "http://hl7.org/fhir/us/carin-bb/StructureDefinition/C4BB-ExplanationOfBenefit-Professional-NonClinician"
+      ]
+    },
+    "contained": [
+      {
+        "resourceType": "Organization",
+        "id": "payer",
+        "name": "Synthetic Plan"
+      }
+    ],
+    "status": "active",
+    "type": {
+      "text": "Professional",
+      "coding": [
+        {
+          "system": "http://terminology.hl7.org/CodeSystem/claim-type",
+          "code": "professional",
+          "display": "Professional"
+        }
+      ]
+    },
+    "use": "claim",
+    "patient": {
+      "reference": "Patient/pat-0001",
+      "display": "Robin Testperson"
+    },
+    "billablePeriod": {
+      "start": "2020-01-02",
+      "end": "2020-01-02"
+    },
+    "created": "2020-01-10T00:00:00Z",
+    "insurer": {
+      "reference": "#payer"
+    },
+    "provider": {
+      "reference": "Organization/org-0001"
+    },
+    "outcome": "complete",
+    "supportingInfo": [
+      {
+        "sequence": 1,
+        "category": {
+          "text": "Claim received date",
+          "coding": [
+            {
+              "system": "http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBSupportingInfoType",
+              "code": "clmrecvddate",
+              "display": "Claim received date"
+            }
+          ]
+        },
+        "timingDate": "2020-01-05"
+      }
+    ],
+    "careTeam": [
+      {
+        "sequence": 1,
+        "provider": {
+          "reference": "Practitioner/prac-0001"
+        },
+        "role": {
+          "text": "Performing"
+        }
+      }
+    ],
+    "diagnosis": [
+      {
+        "sequence": 1,
+        "diagnosisCodeableConcept": {
+          "text": "Synthetic condition"
+        }
+      }
+    ],
+    "insurance": [
+      {
+        "focal": true,
+        "coverage": {
+          "reference": "Coverage/cov-0001"
+        }
+      }
+    ],
+    "item": [
+      {
+        "sequence": 1,
+        "careTeamSequence": [
+          1
+        ],
+        "diagnosisSequence": [
+          1
+        ],
+        "productOrService": {
+          "text": "Synthetic office visit"
+        },
+        "servicedDate": "2020-01-02",
+        "net": {
+          "value": 150.00,
+          "currency": "USD"
+        },
+        "adjudication": [
+          {
+            "category": {
+              "text": "Submitted",
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/adjudication",
+                  "code": "submitted",
+                  "display": "Submitted"
+                }
+              ]
+            },
+            "amount": {
+              "value": 150.00,
+              "currency": "USD"
+            }
+          },
+          {
+            "category": {
+              "text": "Eligible",
+              "coding": [
+                {
+                  "system": "http://terminology.hl7.org/CodeSystem/adjudication",
+                  "code": "eligible",
+                  "display": "Eligible"
+                }
+              ]
+            },
+            "amount": {
+              "value": 100.00,
+              "currency": "USD"
+            }
+          },
+          {
+            "category": {
+              "text": "Paid to provider",
+              "coding": [
+                {
+                  "system": "http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBAdjudication",
+                  "code": "paidtoprovider",
+                  "display": "Paid to provider"
+                }
+              ]
+            },
+            "amount": {
+              "value": 80.00,
+              "currency": "USD"
+            }
+          },
+          {
+            "category": {
+              "text": "Member liability",
+              "coding": [
+                {
+                  "system": "http://hl7.org/fhir/us/carin-bb/CodeSystem/C4BBAdjudication",
+                  "code": "memberliability",
+                  "display": "Member liability"
+                }
+              ]
+            },
+            "amount": {
+              "value": 20.00,
+              "currency": "USD"
+            }
+          }
+        ]
+      }
+    ],
+    "total": [
+      {
+        "category": {
+          "text": "Submitted"
+        },
+        "amount": {
+          "value": 150.00,
+          "currency": "USD"
+        }
+      },
+      {
+        "category": {
+          "text": "Member liability"
+        },
+        "amount": {
+          "value": 20.00,
+          "currency": "USD"
+        }
+      }
+    ],
+    "payment": {
+      "date": "2020-01-15",
+      "amount": {
+        "value": 80.00,
+        "currency": "USD"
+      }
+    },
+    "benefitBalance": [
+      {
+        "category": {
+          "text": "Medical care"
+        },
+        "network": {
+          "text": "In network"
+        },
+        "unit": {
+          "text": "Individual"
+        },
+        "term": {
+          "text": "Annual"
+        },
+        "financial": [
+          {
+            "type": {
+              "text": "Deductible"
+            },
+            "allowedMoney": {
+              "value": 500.00,
+              "currency": "USD"
+            },
+            "usedMoney": {
+              "value": 100.00,
+              "currency": "USD"
+            }
+          }
+        ]
+      }
+    ]
+  }
+]

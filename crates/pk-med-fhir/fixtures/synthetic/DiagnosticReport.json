@@ -1,0 +1,33 @@
+[
+  {
+    "resourceType": "DiagnosticReport",
+    "id": "dr-0001",
+    "status": "final",
+    "category": [
+      {
+        "text": "Laboratory"
+      }
+    ],
+    "code": {
+      "text": "Synthetic panel"
+    },
+    "subject": {
+      "reference": "Patient/pat-0001",
+      "display": "Robin Testperson"
+    },
+    "effectiveDateTime": "2020-01-02T09:10:00Z",
+    "issued": "2020-01-02T12:00:00Z",
+    "result": [
+      {
+        "reference": "Observation/obs-0001"
+      }
+    ],
+    "presentedForm": [
+      {
+        "contentType": "application/pdf",
+        "url": "Binary/bin-0001",
+        "title": "Synthetic report"
+      }
+    ]
+  }
+]

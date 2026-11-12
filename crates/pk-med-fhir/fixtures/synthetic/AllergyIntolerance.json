@@ -1,0 +1,30 @@
+[
+  {
+    "resourceType": "AllergyIntolerance",
+    "id": "allergy-0001",
+    "clinicalStatus": {
+      "text": "Active"
+    },
+    "verificationStatus": {
+      "text": "Confirmed"
+    },
+    "code": {
+      "text": "Synthetic allergen"
+    },
+    "patient": {
+      "reference": "Patient/pat-0001",
+      "display": "Robin Testperson"
+    },
+    "recordedDate": "2019-01-01",
+    "reaction": [
+      {
+        "manifestation": [
+          {
+            "text": "Synthetic rash"
+          }
+        ],
+        "severity": "mild"
+      }
+    ]
+  }
+]

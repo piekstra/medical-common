@@ -1,0 +1,57 @@
+# medical-common
+
+The shared crates of the household's health-records CLIs, built on
+[cli-common](https://github.com/piekstra/cli-common)'s `piekstra-cli/1`.
+
+| Crate | Contents |
+|---|---|
+| `pk-med-records` | The `health-records/v1` profile: `Organization` (`org-list/v1`), `PatientContext` (`patient-list/v1`), `Provenance` (`provenance/v1`), and the `records-stream/v1` NDJSON stream with its writer and reader |
+| `pk-med-fhir` | Our own FHIR R4 / US Core types, lossless on a round trip, CARIN Blue Button claims included; a read client over cli-common's transport seam (read, search with paging, Binary, OperationOutcome and status to exit codes, Retry-After); a mock SMART + FHIR server for tests (feature `test-util`) |
+
+[DESIGN.md](DESIGN.md) is the specification: the commands every provider and
+insurer CLI implements, the DTOs, the stream, and how the profile composes
+with cli-common's `documents/v1`.
+
+These crates handle medical records, the most sensitive data a household
+has. Nothing in this repository is real: every fixture is synthetic
+([PRIVACY.md](PRIVACY.md)). The crates read records; they send them nowhere
+but the program that asked.
+
+## Use
+
+```toml
+[dependencies]
+pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.1.0" }
+pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.1.0" }
+# The same cli-common tag medical-common pins (DESIGN.md §3):
+pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.29.0" }
+
+[dev-dependencies]
+pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.1.0", features = ["test-util"] }
+```
+
+A pull, in brief:
+
+```rust,ignore
+let client = FhirClient::new(&transport, &org.fhir_base, "mychart", VERSION)?
+    .bearer(token);
+let mut out = RecordsWriter::start(std::io::stdout().lock(), &header)?;
+let page = block_on(client.search("Observation", &[("patient", id.clone())]))?;
+for resource in &page.resources {
+    out.resource(resource)?;
+}
+out.finish(now_rfc3339(), None)?;
+```
+
+## Develop
+
+```sh
+make verify   # fmt check, clippy -D warnings, tests, cargo-deny: what CI runs
+```
+
+Tests are offline: the mock server listens on 127.0.0.1, and nothing reads
+the keychain.
+
+## Licence
+
+MIT OR Apache-2.0.

@@ -1,0 +1,6 @@
+{
+  "resourceType": "OperationOutcome",
+  "issue": [
+    { "severity": "error", "code": "not-found", "diagnostics": "no such resource" }
+  ]
+}
