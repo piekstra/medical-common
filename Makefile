@@ -12,18 +12,20 @@ fmt-check:
 	$(CARGO) fmt --all --check
 
 lint:
-	$(CARGO) clippy --workspace --all-targets -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
 
 test:
-	$(CARGO) test --workspace
+	$(CARGO) test --workspace --all-features
 
-# Each crate builds and lints without its test-util feature too, so the
-# mock server never leaks into a consumer's normal build.
+# Each crate builds and lints with and without each feature: the mock server
+# never leaks into a consumer's normal build, and `rsa` stays optional.
 feature-check:
 	$(CARGO) clippy -p pk-med-fhir --lib -- -D warnings
 	$(CARGO) clippy -p pk-med-records --lib -- -D warnings
 	$(CARGO) clippy -p pk-med-fhir --lib --features test-util -- -D warnings
 	$(CARGO) clippy -p pk-med-records --lib --features test-util -- -D warnings
+	$(CARGO) clippy -p pk-med-smart --lib -- -D warnings
+	$(CARGO) clippy -p pk-med-smart --lib --features rsa -- -D warnings
 
 deny:
 	$(CARGO) deny check
