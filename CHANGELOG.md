@@ -11,6 +11,17 @@
   longer fails its page: `RawEntry::unreadable` says why, and
   `SearchResult::unreadable` lists them. `SearchResult` and `RawEntry` gain
   a public field each.
+- `pk-med-fhir`: "sign in again" and "try again later" are the error's
+  remedy (`outcome::SIGN_IN_AGAIN`, `outcome::TRY_AGAIN`), no longer part
+  of its message, so a CLI replaces them with its own.
+- `pk-med-records`: `create_export_file` returns an `ExportFile`. The
+  stream is written beside `records.ndjson` and replaces it only on
+  `ExportFile::commit` (sync, rename, sync the directory), so an export cut
+  short leaves the previous complete one; dropped uncommitted, the file is
+  removed. Breaking: it returned `(PathBuf, File)`, and renamed the empty
+  file into place before anything was written.
+- Pins cli-common v0.31.1 (every `pk-cli-*`): `private_file` syncs before
+  it renames.
 
 ## v0.1.0 — 2026-11-12
 

@@ -210,12 +210,17 @@ name, and the line and column.
 ### 1.5 `records export -o <DIR>` (`records-export/v1`)
 
 The same stream, to `<DIR>/records.ndjson`, by
-`pk_med_records::create_export_file`: the directory is created with mode
-0700 when missing, and the file is created new with mode 0600 under a
-temporary name (`O_EXCL`, which follows no link) and renamed into place. An
-ordinary file or a hard link already at `records.ndjson` is replaced by the
-rename and never written through. A symbolic link there is refused, never
-followed: exit 2 (`CliError::Usage`), and nothing is written. stdout gets one `records-export/v1` document: `{schema, path,
+`pk_med_records::create_export_file`, which returns an `ExportFile`. The
+directory is created with mode 0700 when missing, and the stream is written
+to a new file with mode 0600 under a temporary name in it (`O_EXCL`, which
+follows no link). `ExportFile::commit`, called after `RecordsWriter::finish`,
+syncs the file, renames it onto `records.ndjson` and syncs the directory.
+Until then a previous export there is untouched: an export that is killed,
+runs out of space or fails partway leaves the last complete one, and an
+`ExportFile` dropped without a commit removes its file. An ordinary file or
+a hard link already at `records.ndjson` is replaced by the rename and never
+written through. A symbolic link there is refused, never followed: exit 2
+(`CliError::Usage`), and nothing is written. stdout gets one `records-export/v1` document: `{schema, path,
 bytes, complete, counts, skipped?}`, `bytes` being the whole file, trailer
 included (`RecordsExport::new(path, &finished)`, from what
 `RecordsWriter::finish` returned). Development and tests use it with
@@ -362,7 +367,7 @@ code runs over `pk_cli_http::BlockingTransport` (driven with
   with reason `pk_med_fhir::UNREACHABLE` (`Reason::Provider("unreachable")`):
   the connection failed, timed out, or broke before the whole answer was
   read. A server that answered with an error status has no such reason,
-  and a reason the transport set is kept. cli-common v0.31.0's transport
+  and a reason the transport set is kept. cli-common's transport
   does not say which of those it was, so `UNREACHABLE` is not proof the
   network is gone: one slow page that timed out three times reads the
   same. A CLI that ends a run on it, rather than skip one type, can first
@@ -391,7 +396,11 @@ severity `error` or `fatal` (a warning never does), by the issue's code: `login`
 OperationOutcome with errors in place of a resource with a 2xx is mapped the
 same way. Messages name the server's origin and the resource type, never a
 query, an id or a token, and quote the outcome's text cut to printable
-characters.
+characters. What to do next is the error's remedy, not part of its
+message: `outcome::SIGN_IN_AGAIN` on exit 3 with `CredentialRefused`,
+`outcome::TRY_AGAIN` on an answer that says nothing. A CLI replaces it with
+its own (`err.with_remedy("run auth login --org …")`) instead of printing
+two.
 
 ### 2.3 `test-util`: the mock server
 
@@ -414,8 +423,8 @@ a complete stream, for a store's tests.
 Pin a tag, never a branch or a path:
 
 ```toml
-pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.1.0" }
-pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.1.0" }
+pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.2.0" }
+pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.2.0" }
 ```
 
 Each medical-common tag pins one cli-common tag for every `pk-cli-*` crate,
@@ -426,3 +435,4 @@ does not convert to the other.
 | medical-common | cli-common |
 |---|---|
 | v0.1.0 | v0.31.0 |
+| v0.2.0 | v0.31.1 |

@@ -24,7 +24,7 @@ but the program that asked.
 pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.1.0" }
 pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.1.0" }
 # The same cli-common tag medical-common pins (DESIGN.md §3):
-pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
+pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
 
 [dev-dependencies]
 pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.1.0", features = ["test-util"] }

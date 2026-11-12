@@ -1290,8 +1290,8 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-core"
-version = "0.31.0"
-source = "git+https://github.com/piekstra/cli-common?tag=v0.31.0#bf3a3e534428b931f13c4f426eec270bd9a38fd8"
+version = "0.31.1"
+source = "git+https://github.com/piekstra/cli-common?tag=v0.31.1#a8ad14976febd0782d9830388d95b86e8713028a"
 dependencies = [
  "clap",
  "libc",
@@ -1301,8 +1301,8 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-http"
-version = "0.31.0"
-source = "git+https://github.com/piekstra/cli-common?tag=v0.31.0#bf3a3e534428b931f13c4f426eec270bd9a38fd8"
+version = "0.31.1"
+source = "git+https://github.com/piekstra/cli-common?tag=v0.31.1#a8ad14976febd0782d9830388d95b86e8713028a"
 dependencies = [
  "clap",
  "pk-cli-core",
@@ -1312,8 +1312,8 @@ dependencies = [
 
 [[package]]
 name = "pk-cli-secrets"
-version = "0.31.0"
-source = "git+https://github.com/piekstra/cli-common?tag=v0.31.0#bf3a3e534428b931f13c4f426eec270bd9a38fd8"
+version = "0.31.1"
+source = "git+https://github.com/piekstra/cli-common?tag=v0.31.1#a8ad14976febd0782d9830388d95b86e8713028a"
 dependencies = [
  "clap",
  "keyring",

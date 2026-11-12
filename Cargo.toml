@@ -14,9 +14,9 @@ authors = ["piekstra"]
 [workspace.dependencies]
 # Every pk-cli-* on one cli-common tag, and the same tag the consuming CLIs
 # pin: two tags in one build are two copies of every pk-cli-core type.
-pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
-pk-cli-secrets = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
-pk-cli-http = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.0" }
+pk-cli-core = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
+pk-cli-secrets = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
+pk-cli-http = { git = "https://github.com/piekstra/cli-common", tag = "v0.31.1" }
 pk-med-fhir = { path = "crates/pk-med-fhir", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 # raw_value: a resource is kept as the server's own text (pk_med_fhir::raw).
