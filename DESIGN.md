@@ -2,7 +2,8 @@
 
 Status: v0.1.0 ships `pk-med-records` and `pk-med-fhir`; v0.2.0 adds
 `pk-med-smart` (SMART App Launch, §3); v0.3.0 adds `pk-med-dicom` (DICOM
-headers, §4).
+headers, §4); v0.4.0 adds the OpenID nonce (§3.1) and a vendor's retry
+guidance (§2.2).
 
 This document is the specification of the profile, in the style of
 cli-common's domain profiles (`documents/v1`, `utility/v1`, cli-common
@@ -814,10 +815,10 @@ them at run time.
 Pin a tag, never a branch or a path:
 
 ```toml
-pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.3.0" }
-pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.3.0" }
-pk-med-smart = { git = "https://github.com/piekstra/medical-common", tag = "v0.3.0" }   # features = ["rsa"] for §3.4
-pk-med-dicom = { git = "https://github.com/piekstra/medical-common", tag = "v0.3.0" }   # features = ["test-util"] for §4.6
+pk-med-records = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.0" }
+pk-med-fhir = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.0" }
+pk-med-smart = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.0" }   # features = ["rsa"] for §3.4
+pk-med-dicom = { git = "https://github.com/piekstra/medical-common", tag = "v0.4.0" }   # features = ["test-util"] for §4.6
 ```
 
 Each medical-common tag pins one cli-common tag for every `pk-cli-*` crate,
@@ -830,3 +831,4 @@ does not convert to the other.
 | v0.1.0 | v0.31.0 |
 | v0.2.0 | v0.31.1 |
 | v0.3.0 | v0.31.1 |
+| v0.4.0 | v0.31.1 |

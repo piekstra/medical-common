@@ -22,7 +22,8 @@ pub enum DicomError {
         what: String,
     },
     /// Past a limit this reader keeps ([`crate::MAX_VALUE_BYTES`],
-    /// [`crate::MAX_HEADER_BYTES`], [`crate::MAX_DEPTH`]).
+    /// [`crate::MAX_HEADER_BYTES`], [`crate::MAX_INFLATED_BYTES`],
+    /// [`crate::MAX_DEPTH`]).
     Limit {
         offset: u64,
         what: &'static str,
