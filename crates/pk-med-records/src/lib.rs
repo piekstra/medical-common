@@ -22,7 +22,7 @@ pub use dto::{
     org_list, patient_list, Organization, PatientContext, Provenance, ProvenanceSource,
     RecordsExport, SourceResource, PROFILE,
 };
-pub use export::{create_export_file, ExportFile, EXPORT_FILE};
+pub use export::{create_export_file, ExportFile, EXPORT_FILE, INCOMPLETE_FILE};
 pub use pk_med_fhir::RawResource;
 pub use stream::{
     Finished, Header, Item, RecordsReader, RecordsWriter, Skip, Source, StreamError, Trailer,

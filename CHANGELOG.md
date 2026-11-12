@@ -43,11 +43,14 @@ renames). A consumer moves its own `pk-cli-*` to v0.31.1 in the same change.
   remedy (`outcome::SIGN_IN_AGAIN`, `outcome::TRY_AGAIN`), no longer part
   of its message, so a CLI replaces them with its own.
 - `pk-med-records`: `create_export_file` returns an `ExportFile`. The
-  stream is written beside `records.ndjson` and replaces it only on
-  `ExportFile::commit` (sync, rename, sync the directory), so an export cut
-  short leaves the previous complete one; dropped uncommitted, the file is
-  removed. Breaking: it returned `(PathBuf, File)`, and renamed the empty
-  file into place before anything was written.
+  stream is written beside `records.ndjson`. `ExportFile::commit(&finished)`
+  syncs, renames and syncs the directory: a complete stream replaces
+  `records.ndjson`, and an incomplete one goes to
+  `records.incomplete.ndjson` (`INCOMPLETE_FILE`), keeping the last
+  complete export. Dropped uncommitted, the file is removed, and a killed
+  run's file is removed by the next export (each export locks its own).
+  Breaking: it returned `(PathBuf, File)`, and renamed the empty file into
+  place before anything was written.
 
 ## v0.1.0 — 2026-11-12
 

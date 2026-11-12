@@ -213,14 +213,27 @@ The same stream, to `<DIR>/records.ndjson`, by
 `pk_med_records::create_export_file`, which returns an `ExportFile`. The
 directory is created with mode 0700 when missing, and the stream is written
 to a new file with mode 0600 under a temporary name in it (`O_EXCL`, which
-follows no link). `ExportFile::commit`, called after `RecordsWriter::finish`,
-syncs the file, renames it onto `records.ndjson` and syncs the directory.
-Until then a previous export there is untouched: an export that is killed,
-runs out of space or fails partway leaves the last complete one, and an
-`ExportFile` dropped without a commit removes its file. An ordinary file or
-a hard link already at `records.ndjson` is replaced by the rename and never
-written through. A symbolic link there is refused, never followed: exit 2
-(`CliError::Usage`), and nothing is written. stdout gets one `records-export/v1` document: `{schema, path,
+follows no link). `ExportFile::commit(&finished)`, called with what
+`RecordsWriter::finish` returned, syncs the file, renames it into place and
+syncs the directory:
+
+- A complete stream goes to `records.ndjson`, and removes any
+  `records.incomplete.ndjson`, which is older.
+- An incomplete one (`complete: false`: a provider's error stopped the
+  pull) goes to `records.incomplete.ndjson`, and the last complete export
+  at `records.ndjson` is kept.
+
+Until the commit nothing at either name changes, so an export that is
+killed, runs out of space or fails leaves the last complete one. An
+`ExportFile` dropped without a commit removes its file. A run killed before
+that leaves it, hidden as `.records.ndjson.<pid>.<nanos>.<n>.tmp`: each
+export holds a lock on its own file while it runs, and the next export to
+the directory removes every such file of the same owner that no live
+process holds. An ordinary file or a hard link already at either name is
+replaced by the rename and never written through. A symbolic link at
+`records.ndjson` is refused, never followed: exit 2 (`CliError::Usage`), and
+nothing is written. stdout gets one `records-export/v1` document (`path` being where `commit`
+put it): `{schema, path,
 bytes, complete, counts, skipped?}`, `bytes` being the whole file, trailer
 included (`RecordsExport::new(path, &finished)`, from what
 `RecordsWriter::finish` returned). Development and tests use it with

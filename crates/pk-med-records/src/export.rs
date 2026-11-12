@@ -7,18 +7,31 @@ use std::path::{Path, PathBuf};
 
 use pk_cli_core::CliError;
 
+use crate::stream::Finished;
+
 /// The stream file's name in the export directory.
 pub const EXPORT_FILE: &str = "records.ndjson";
+/// Where an incomplete stream (`complete: false`) is committed, beside the
+/// last complete export, which it never replaces.
+pub const INCOMPLETE_FILE: &str = "records.incomplete.ndjson";
+
+/// The temporary files' names: `.records.ndjson.<pid>.<nanos>.<n>.tmp`.
+const TEMPORARY_PREFIX: &str = ".records.ndjson.";
+const TEMPORARY_SUFFIX: &str = ".tmp";
 
 /// An export being written: a new file beside `records.ndjson`, mode 0600 on
-/// Unix, that becomes `records.ndjson` only on [`ExportFile::commit`].
-/// Until then a previous export there is untouched, so an export that is
-/// killed, runs out of space or fails partway leaves the last complete one
-/// in place. Dropped without a commit, the file is removed.
+/// Unix, that becomes `records.ndjson` only on [`ExportFile::commit`] of a
+/// complete stream. An incomplete one goes to `records.incomplete.ndjson`
+/// instead. So the last complete export stays in place whether a run is
+/// killed, runs out of space, or ends with `complete: false` on a provider's
+/// error. Dropped without a commit, the file is removed. A run killed before
+/// its drop leaves the file, and the next export to the directory removes
+/// it: while an export runs it holds a lock on its file, and a file no live
+/// process holds is a leftover.
 ///
 /// Stream into it with [`RecordsWriter`](crate::RecordsWriter) through
 /// [`ExportFile::file`] (or the `Write` impl), `finish` the writer, then
-/// `commit`.
+/// `commit` with what `finish` returned.
 #[derive(Debug)]
 pub struct ExportFile {
     path: PathBuf,
@@ -28,7 +41,8 @@ pub struct ExportFile {
 }
 
 impl ExportFile {
-    /// Where the export goes on [`Self::commit`]: `<dir>/records.ndjson`.
+    /// Where a complete export goes on [`Self::commit`]:
+    /// `<dir>/records.ndjson`.
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -38,17 +52,33 @@ impl ExportFile {
         &mut self.file
     }
 
-    /// Flush the file to disk, rename it onto `records.ndjson` (replacing,
-    /// never writing through, what is there), and flush the directory.
-    /// Returns the final path. Call it once the writer has finished: what is
-    /// committed is what was written.
-    pub fn commit(mut self) -> Result<PathBuf, CliError> {
+    /// Flush the file to disk, rename it into place (replacing, never
+    /// writing through, what is there), and flush the directory. `finished`
+    /// is what [`RecordsWriter::finish`](crate::RecordsWriter::finish)
+    /// returned for this file. A complete stream goes to `records.ndjson`
+    /// and removes any `records.incomplete.ndjson`, which is older. An
+    /// incomplete one goes to `records.incomplete.ndjson`, and the last
+    /// complete export is kept. Returns where it went, for
+    /// [`RecordsExport::new`](crate::RecordsExport::new).
+    pub fn commit(mut self, finished: &Finished) -> Result<PathBuf, CliError> {
         self.file
             .sync_all()
             .map_err(|e| CliError::Other(format!("writing {}: {e}", self.temporary.display())))?;
-        std::fs::rename(&self.temporary, &self.path)
-            .map_err(|e| CliError::Other(format!("creating {}: {e}", self.path.display())))?;
+        let target = if finished.trailer.complete {
+            self.path.clone()
+        } else {
+            self.path.with_file_name(INCOMPLETE_FILE)
+        };
+        std::fs::rename(&self.temporary, &target)
+            .map_err(|e| CliError::Other(format!("creating {}: {e}", target.display())))?;
         self.done = true;
+        if finished.trailer.complete {
+            let stale = self.path.with_file_name(INCOMPLETE_FILE);
+            if std::fs::symlink_metadata(&stale).is_ok() {
+                std::fs::remove_file(&stale)
+                    .map_err(|e| CliError::Other(format!("removing {}: {e}", stale.display())))?;
+            }
+        }
         // The rename is durable once the directory is. A filesystem that
         // cannot sync a directory has still renamed the file.
         if let Some(dir) = self.path.parent() {
@@ -56,7 +86,7 @@ impl ExportFile {
                 let _ = dir.sync_all();
             }
         }
-        Ok(self.path.clone())
+        Ok(target)
     }
 }
 
@@ -113,6 +143,13 @@ pub fn create_export_file(dir: &Path) -> Result<ExportFile, CliError> {
         )));
     }
     let (temporary, file) = create_new_beside(dir)?;
+    // Held until the file is committed or the process ends, so another
+    // export can tell a leftover from a file being written.
+    file.try_lock().map_err(|e| {
+        let _ = std::fs::remove_file(&temporary);
+        CliError::Other(format!("locking {}: {e}", temporary.display()))
+    })?;
+    remove_leftovers(dir, &temporary, &file);
     let export = ExportFile {
         path,
         temporary,
@@ -132,6 +169,58 @@ pub fn create_export_file(dir: &Path) -> Result<ExportFile, CliError> {
             })?;
     }
     Ok(export)
+}
+
+/// Remove temporary files earlier exports to `dir` left when they were
+/// killed: regular files with the temporary name, owned by whoever owns
+/// `ours`, that no live process holds locked. Best effort: a file that
+/// cannot be checked is left alone.
+fn remove_leftovers(dir: &Path, ours: &Path, our_file: &File) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    #[cfg(unix)]
+    let owner = {
+        use std::os::unix::fs::MetadataExt;
+        match our_file.metadata() {
+            Ok(m) => m.uid(),
+            Err(_) => return,
+        }
+    };
+    #[cfg(not(unix))]
+    let _ = our_file;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if path == ours || !name.starts_with(TEMPORARY_PREFIX) || !name.ends_with(TEMPORARY_SUFFIX)
+        {
+            continue;
+        }
+        let Ok(seen) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !seen.file_type().is_file() {
+            continue;
+        }
+        let Ok(leftover) = File::open(&path) else {
+            continue;
+        };
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // The file opened is the one looked at, and it is the user's own.
+            let Ok(opened) = leftover.metadata() else {
+                continue;
+            };
+            if (opened.dev(), opened.ino()) != (seen.dev(), seen.ino()) || opened.uid() != owner {
+                continue;
+            }
+        }
+        if leftover.try_lock().is_ok() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// A new file in `dir` under a name no one else holds.
@@ -189,6 +278,20 @@ mod tests {
         dir
     }
 
+    fn finished(complete: bool) -> Finished {
+        Finished {
+            trailer: crate::Trailer {
+                schema: crate::stream::END_SCHEMA.into(),
+                complete,
+                counts: Default::default(),
+                skipped: Vec::new(),
+                finished_at: None,
+                error: None,
+            },
+            bytes: 0,
+        }
+    }
+
     fn names(dir: &Path) -> Vec<String> {
         let mut names: Vec<_> = std::fs::read_dir(dir)
             .unwrap()
@@ -203,7 +306,7 @@ mod tests {
         let dir = scratch("mode").join("nested");
         let mut export = create_export_file(&dir).unwrap();
         writeln!(export.file(), "x").unwrap();
-        let path = export.commit().unwrap();
+        let path = export.commit(&finished(true)).unwrap();
         assert_eq!(path, dir.join(EXPORT_FILE));
         #[cfg(unix)]
         {
@@ -213,7 +316,10 @@ mod tests {
             let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
             assert_eq!(dir_mode, 0o700);
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-            create_export_file(&dir).unwrap().commit().unwrap();
+            create_export_file(&dir)
+                .unwrap()
+                .commit(&finished(true))
+                .unwrap();
             let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600, "an existing file is narrowed too");
         }
@@ -243,7 +349,7 @@ mod tests {
 
         let mut export = create_export_file(&dir).unwrap();
         writeln!(export.file(), "whole").unwrap();
-        export.commit().unwrap();
+        export.commit(&finished(true)).unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.join(EXPORT_FILE)).unwrap(),
             "whole\n"
@@ -263,10 +369,10 @@ mod tests {
         for resource in pk_med_fhir::test_util::synthetic_all() {
             writer.resource(&resource).unwrap();
         }
-        let finished = writer.finish("2020-01-03T00:01:00Z", None).unwrap();
-        let path = export.commit().unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), finished.bytes);
-        assert!(finished.trailer.complete);
+        let done = writer.finish("2020-01-03T00:01:00Z", None).unwrap();
+        let path = export.commit(&done).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), done.bytes);
+        assert!(done.trailer.complete);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -281,7 +387,7 @@ mod tests {
         let old = std::fs::File::open(dir.join(EXPORT_FILE)).unwrap();
         let mut export = create_export_file(&dir).unwrap();
         writeln!(export.file(), "new").unwrap();
-        let path = export.commit().unwrap();
+        let path = export.commit(&finished(true)).unwrap();
         assert_eq!(std::fs::read_to_string(&other).unwrap(), "kept");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
         let mut seen = String::new();
@@ -302,6 +408,64 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("elsewhere"), dir.join(EXPORT_FILE)).unwrap();
         assert_eq!(create_export_file(&dir).unwrap_err().exit_code(), 2);
         assert!(!dir.join("elsewhere").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_incomplete_stream_never_replaces_a_complete_one() {
+        let dir = scratch("incomplete");
+        let mut export = create_export_file(&dir).unwrap();
+        writeln!(export, "whole").unwrap();
+        export.commit(&finished(true)).unwrap();
+
+        let mut export = create_export_file(&dir).unwrap();
+        writeln!(export, "cut short by a provider's error").unwrap();
+        let went = export.commit(&finished(false)).unwrap();
+        assert_eq!(went, dir.join(INCOMPLETE_FILE));
+        assert_eq!(
+            std::fs::read_to_string(dir.join(EXPORT_FILE)).unwrap(),
+            "whole\n"
+        );
+        assert_eq!(names(&dir), [INCOMPLETE_FILE, EXPORT_FILE]);
+
+        // The next complete export removes the incomplete one, now older.
+        let mut export = create_export_file(&dir).unwrap();
+        writeln!(export, "whole again").unwrap();
+        export.commit(&finished(true)).unwrap();
+        assert_eq!(names(&dir), [EXPORT_FILE]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_killed_exports_file_is_removed_by_the_next_and_a_live_ones_is_not() {
+        let dir = scratch("leftover");
+        std::fs::create_dir_all(&dir).unwrap();
+        // What a killed run leaves: its file, held by no one.
+        let leftover = dir.join(format!("{TEMPORARY_PREFIX}1.2.0{TEMPORARY_SUFFIX}"));
+        std::fs::write(&leftover, "partial").unwrap();
+        // An export still running holds its file locked.
+        let live = create_export_file(&dir).unwrap();
+        assert!(!leftover.exists(), "the leftover is removed");
+        let second = create_export_file(&dir).unwrap();
+        assert!(live.temporary.exists(), "a live export's file is kept");
+        drop(second);
+        drop(live);
+        assert!(names(&dir).is_empty(), "{:?}", names(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_name_that_is_a_link_is_left_alone() {
+        let dir = scratch("leftover-link");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("kept");
+        std::fs::write(&target, "kept").unwrap();
+        let link = dir.join(format!("{TEMPORARY_PREFIX}1.2.0{TEMPORARY_SUFFIX}"));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        drop(create_export_file(&dir).unwrap());
+        assert!(std::fs::symlink_metadata(&link).is_ok());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "kept");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
